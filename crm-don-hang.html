@@ -289,7 +289,7 @@ const isEmbedded = (() => { try { return window.self !== window.top; } catch(e) 
 // ---------- Trạng thái ứng dụng ----------
 const KEY = 'crm-don-hang-supership-v1';
 let S;
-const UI = { group:'all', q:'', range:'30', sel:new Set(), form:null, editId:null, drawer:null, custQ:'', custF:'all', showDone:false, importRows:null, warehouses:null, lastAuto:Date.now(), busy:false };
+const UI = { group:'all', q:'', range:'30', sel:new Set(), form:null, editId:null, drawer:null, custQ:'', custF:'all', showDone:false, importRows:null, warehouses:null, lastAuto:Date.now(), busy:false, rev:0 };
 
 function defaults(){
   return { version:1, sample:false, seq:0,
@@ -301,7 +301,7 @@ function setState(d){ S = Object.assign(defaults(), d); S.settings = Object.assi
 async function load(){
   const r = await fetch('api/state', {cache:'no-store'});
   if (!r.ok) throw new Error('Server trả lỗi ' + r.status);
-  const {state} = await r.json();
+  const {state, rev} = await r.json(); UI.rev = rev || 0;
   if (state) { setState(state); markSaved(); return; }
   // DB trống: chuyển dữ liệu cũ từ localStorage lên (nếu có), không thì tạo dữ liệu mẫu
   let old = null; try { old = JSON.parse(localStorage.getItem(KEY)); } catch(e) {}
@@ -340,6 +340,34 @@ async function flush(throwErr){
   finally { saving = null; }
 }
 function save(){ clearTimeout(saveT); saveT = setTimeout(flush, 300); }
+async function serverApi(method, path, body){
+  const r = await fetch(path, {method, headers: body ? {'Content-Type':'application/json'} : {}, body: body ? JSON.stringify(body) : undefined});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || 'Server trả lỗi ' + r.status);
+  return d;
+}
+// Nhận đơn server vừa ghi (webhook / kéo từ SuperShip). Đơn đang sửa dở trên máy thì giữ bản trên máy.
+function mergeOrders(list){
+  let n = 0;
+  for (const o of list || []){
+    const j = JSON.stringify(o); const i = S.orders.findIndex(x => x.id === o.id);
+    if (i < 0) S.orders.push(o);
+    else { const cur = JSON.stringify(S.orders[i]); if (cur === j || saved.orders.get(o.id) !== cur) continue; S.orders[i] = o; }
+    saved.orders.set(o.id, j); n++;
+  }
+  if (n) S.orders.sort((a, b) => String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+  return n;
+}
+async function pollServer(){
+  if (!S || document.hidden) return;
+  try {
+    const r = await serverApi('GET', 'api/orders?after=' + UI.rev); UI.rev = r.rev;
+    if (mergeOrders(r.orders) || UI.pendingRender){
+      const typing = document.activeElement && document.activeElement.closest('#main input, #main textarea, #main select, #modal-root, #drawer-root input');
+      if (typing) UI.pendingRender = true; else { UI.pendingRender = false; rerender(true); }
+    }
+  } catch(e) {}
+}
 // Ghi đè toàn bộ dữ liệu trong DB (khôi phục, xoá hết)
 function saveReplace(){ replaceNext = true; save(); }
 window.addEventListener('beforeunload', e => { if (diff(snapshot()) || saving) { flush(); e.preventDefault(); e.returnValue = ''; } });
@@ -363,9 +391,65 @@ function parseSkuText(text){
     return { raw, sku: p ? p.sku : code.toUpperCase(), mult, product: p };
   });
 }
-function itemFromProduct(p, qty){ return { sku:p.sku, name:p.name, qty, price:+p.price||0, cost:+p.cost||0, weight:+p.weight||0 }; }
+function itemFromProduct(p, qty){ return { sku:p.sku, name:p.name, qty, cost:+p.cost||0, weight:+p.weight||0 }; }
 function calcItems(items){ let subtotal=0, weight=0, cost=0; for (const i of items){ subtotal += (+i.price||0)*(+i.qty||0); weight += (+i.weight||0)*(+i.qty||0); cost += (+i.cost||0)*(+i.qty||0); } return {subtotal, weight, cost}; }
-const itemsSummary = o => o.items.map(i => `${i.qty}× ${i.sku}`).join(', ');
+const itemsSummary = o => o.items.map(i => `${i.qty}× ${i.sku || i.name}`).join(', ');
+
+// ---------- Tự nhận tỉnh / quận / phường từ ô địa chỉ ----------
+// Bỏ dấu, giữ nguyên độ dài (1 ký tự → 1 ký tự) để cắt lại được phần số nhà, đường trong chuỗi gốc
+const fold = s => Array.from({length:s.length}, (_, i) => { const d = s[i].normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace('đ','d'); return /^[a-z0-9]$/.test(d) ? d : ' '; }).join('');
+const AREA_PREFIX = [['thanh pho','tp'],['thi xa','tx'],['thi tran','tt'],['quan','q'],['huyen','h'],['phuong','p'],['xa','x'],['tinh','t']];
+const AREA_ALIAS = {'ho chi minh':['hcm','tphcm','sai gon','sg'], 'ha noi':['hn','tphn']};
+function areaVariants(name){
+  const n = fold(String(name||'').normalize('NFC')).replace(/\s+/g,' ').trim(); const v = [];
+  const pre = AREA_PREFIX.find(([full]) => n.startsWith(full + ' ')); const core = pre ? n.slice(pre[0].length + 1) : n;
+  for (const c of /^0\d$/.test(core) ? [core, core.slice(1)] : [core]){
+    if (pre) v.push({t:pre[0] + ' ' + c, w:3}, {t:pre[1] + ' ' + c, w:2}, {t:pre[1] + c.replace(/ /g,''), w:2});
+    if (!/^\d+$/.test(c) && c.length >= 3) v.push({t:c, w:1});
+  }
+  for (const a of AREA_ALIAS[core] || []) v.push({t:a, w:1});
+  return v;
+}
+// Tìm tên khớp nhất trong F[0..end): ưu tiên có tiền tố (Quận, P., ...), nằm về cuối chuỗi, tên dài
+function findArea(F, list, end){
+  const hay = F.slice(0, end); let best = null;
+  for (const x of list) for (const v of areaVariants(x.name)){
+    const re = new RegExp('(^|\\s)(' + v.t.split(' ').join('\\s+') + ')(?=\\s|$)', 'g'); let m;
+    while ((m = re.exec(hay))){
+      const start = m.index + m[1].length; const score = v.w*100 + start/Math.max(1, hay.length)*50 + v.t.length;
+      if (!best || score > best.score) best = {x, start, score};
+    }
+  }
+  return best;
+}
+async function guessArea(text, curProvince){
+  const F = fold(text);
+  const provs = await areaProvinces(); const p = findArea(F, provs, F.length);
+  const prov = p ? p.x : provs.find(x => x.name === curProvince); if (!prov) return null;
+  const out = {province:prov, cut:p ? p.start : F.length, found:!!p};
+  const d = findArea(F, await areaDistricts(prov.code), out.cut);
+  if (d){ out.district = d.x; out.cut = d.start; out.found = true;
+    const c = findArea(F, await areaCommunes(d.x.code), d.start);
+    if (c){ out.commune = c.x; out.cut = c.start; } }
+  return out.found ? out : null;
+}
+let addrSeq = 0, addrT;
+async function autoArea(trim){
+  const inp = $('#f-addr'); if (!inp || !UI.form) return;
+  const text = inp.value.normalize('NFC'); const my = ++addrSeq; const hint = $('#addr-hint');
+  if (fold(text).trim().split(/\s+/).length < 2) return;
+  let g; try { g = await guessArea(text, UI.form.receiver.province); } catch(e) { return; }
+  if (my !== addrSeq || !$('#f-addr')) return;
+  if (!g){ if (hint) hint.textContent = 'Ghi kèm phường, quận, tỉnh (vd: 45 Lê Lợi, P. Bến Thành, Q.1, TP.HCM) để tự chọn địa chỉ.'; return; }
+  const r = UI.form.receiver;
+  const district = g.district ? g.district.name : (g.province.name === r.province ? r.district : '');
+  const v = {province:g.province.name, district, commune:g.commune ? g.commune.name : (district && district === r.district ? r.commune : '')};
+  if (v.province !== r.province || v.district !== r.district || v.commune !== r.commune) await $('#rc-prov')._set(v);
+  if (my !== addrSeq) return;
+  let cut = false;
+  if (trim && g.cut > 0 && g.cut < text.length){ const street = text.slice(0, g.cut).replace(/[\s,.;–-]+$/,'').trim(); if (street.length >= 2){ inp.value = street; r.address = street; cut = true; } }
+  if (hint) hint.innerHTML = `<span class="ok-txt">Tự nhận: ${esc([v.commune, v.district, v.province].filter(Boolean).join(', '))}</span>${v.commune ? '' : ' · chọn tiếp ô còn trống bên dưới'}${cut ? ' · đã tách phần số nhà, đường' : ''}`;
+}
 
 // ---------- Danh mục địa chỉ (demo) ----------
 const DEMO_TREE = [
@@ -465,8 +549,8 @@ function buildPayload(o){
   const p = S.settings.pickup; const body = {
     pickup_code:p.code, pickup_phone:p.phone, pickup_address:p.address, pickup_province:p.province, pickup_district:p.district, pickup_commune:p.commune, pickup_name:p.name, pickup_contact:p.contact,
     name:o.receiver.name, phone:o.receiver.phone, address:o.receiver.address, province:o.receiver.province, district:o.receiver.district, commune:o.receiver.commune,
-    amount:Math.round(o.amount), value:Math.round(o.value), weight:Math.round(o.weight), soc:o.soc, note:o.note, service:'1', config:String(o.config), payer:String(o.payer), product_type:'2',
-    products:o.items.map(i => ({sku:i.sku, name:i.name, price:Math.round(i.price), weight:Math.round(i.weight), quantity:+i.qty})) };
+    amount:Math.round(o.amount), value:Math.round(o.value), weight:Math.round(o.weight), soc:o.soc, note:o.note, service:'1', config:String(o.config), payer:String(o.payer), product_type:'1',
+    product:o.items.map(i => `${i.qty} x ${i.sku}${i.name ? ' - ' + i.name : ''}`).join(', ') };
   Object.keys(body).forEach(k => { if (body[k] === '' || body[k] == null) delete body[k]; });
   return body;
 }
@@ -583,7 +667,8 @@ const SAMPLE_PRODUCTS = [
 function rngFn(seed){ return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 function seedSample(){
   const r = rngFn(20261103); const pick = a => a[Math.floor(r()*a.length)];
-  S.sample = true; S.products = SAMPLE_PRODUCTS.map(p => ({...p}));
+  S.sample = true; S.products = SAMPLE_PRODUCTS.map(({price, ...p}) => p);
+  const priceOf = items => sum(items, i => (SAMPLE_PRODUCTS.find(p => p.sku === i.sku) || {}).price * i.qty);
   S.settings.pickup = {code:'WDEMO01', name:'Kho Bình Chánh', contact:'Nguyễn Thị Lan', phone:'0909123456', address:'123 Quốc lộ 50', province:'Thành phố Hồ Chí Minh', district:'Huyện Bình Chánh', commune:'Xã Bình Hưng'};
   const names = ['Nguyễn Văn Hùng','Trần Thị Mai','Lê Minh Tuấn','Phạm Quốc Bảo','Hoàng Thị Thu','Võ Thanh Sơn','Đặng Văn Lộc','Bùi Thị Hạnh','Đỗ Minh Khoa','Ngô Văn Tài','Huỳnh Thị Ngọc','Phan Văn Đức','Trương Thị Lụa','Lý Văn Phát','Dương Thị Yến','Mai Văn Thắng'];
   const streets = ['Lê Lợi','Nguyễn Trãi','Trần Hưng Đạo','Quang Trung','Hùng Vương','Lý Thường Kiệt','Ấp 3','Tổ 5 Khu phố 2'];
@@ -598,7 +683,7 @@ function seedSample(){
     const ci = k % 9 === 4 ? 3 : Math.floor(r()*custs.length); const cu = custs[ci];
     const n = r() < .7 ? 1 : 2; const items = [];
     for (let j = 0; j < n; j++){ const p = pick(S.products); if (items.find(x => x.sku === p.sku)) continue; items.push(itemFromProduct(p, pick([1,1,1,2,2,3]))); }
-    const t = calcItems(items); const created = new Date(now - age*864e5);
+    const t = calcItems(items); t.subtotal = priceOf(items); const created = new Date(now - age*864e5);
     const o = { id:uid(), soc:nextSoc(created), createdAt:created.toISOString(), updatedAt:created.toISOString(), receiver:{...cu}, items,
       subtotal:t.subtotal, amount:t.subtotal, value:t.subtotal, weight:t.weight, cost:t.cost, payer:'2', config:'1', note:'', status:'draft',
       fee:{shipment:0, insurance:0, return:0}, journeys:[], ssNotes:[], log:[{time:created.toISOString(), text:'Tạo đơn'}], issue:{handled:false, note:''} };
@@ -695,7 +780,7 @@ function vOverview(){
   const gMax = Math.max(1, ...gCount.map(x => x.n));
   // top sản phẩm
   const prod = {};
-  for (const o of recent) if (o.status !== '0') for (const i of o.items){ const p = prod[i.sku] = prod[i.sku] || {sku:i.sku, name:i.name, qty:0, rev:0}; p.qty += +i.qty; p.rev += i.qty*i.price; }
+  for (const o of recent) if (o.status !== '0') for (const i of o.items){ const p = prod[i.sku || i.name] = prod[i.sku || i.name] || {sku:i.sku, name:i.name, qty:0, n:0}; p.qty += +i.qty; p.n++; }
   const top = Object.values(prod).sort((a,b) => b.qty - a.qty).slice(0, 6);
   return `<div class="page-head"><div><h1>Tổng quan</h1><p>Tình hình giao hàng 30 ngày gần nhất.</p></div><div class="row"><button class="btn" data-act="sync-all">Cập nhật trạng thái</button><a class="btn primary" href="#new-order">Tạo đơn</a></div></div>
   <div class="kpis">
@@ -711,8 +796,8 @@ function vOverview(){
     </div></div></div>
   </div>
   <div class="panel" style="margin-top:16px"><div class="panel-h"><h3>Sản phẩm bán chạy</h3><span class="muted sm">30 ngày, không tính đơn huỷ</span></div>
-    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>SKU</th><th>Sản phẩm</th><th class="num">Số lượng</th><th class="num">Doanh thu</th></tr></thead><tbody>
-    ${top.map(p => `<tr><td class="mono strong">${esc(p.sku)}</td><td>${esc(p.name)}</td><td class="num">${fmtNum(p.qty)}</td><td class="num">${fmtMoney(p.rev)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Chưa có dữ liệu</td></tr>'}
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>SKU</th><th>Sản phẩm</th><th class="num">Số lượng</th><th class="num">Số đơn</th></tr></thead><tbody>
+    ${top.map(p => `<tr><td class="mono strong">${esc(p.sku)}</td><td>${esc(p.name)}</td><td class="num">${fmtNum(p.qty)}</td><td class="num">${fmtNum(p.n)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Chưa có dữ liệu</td></tr>'}
     </tbody></table></div></div>`;
 }
 function niceMax(v){ if (v <= 4) return 4; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1,2,2.5,5,10]) if (m*p >= v) return m*p; return 10*p; }
@@ -734,7 +819,7 @@ function inRange(o){ if (UI.range === 'all') return true; return +new Date(o.cre
 function matchQ(o){ const q = UI.q.trim().toLowerCase(); if (!q) return true; return [o.soc, o.ssCode, o.shortcode, o.receiver.name, o.receiver.phone, o.receiver.province, itemsSummary(o)].some(x => String(x||'').toLowerCase().includes(q)); }
 function vOrders(){
   return `<div class="page-head"><div><h1>Đơn hàng</h1><p>Bấm vào một đơn để xem hành trình, in vận đơn hoặc huỷ.</p></div>
-    <div class="row wrap"><button class="btn" data-act="import-open">Nhập từ Excel</button><button class="btn" data-act="sync-all">Cập nhật trạng thái</button><a class="btn primary" href="#new-order">Tạo đơn</a></div></div>
+    <div class="row wrap"><button class="btn" data-act="pull-open">Kéo đơn từ SuperShip</button><button class="btn" data-act="import-open">Nhập từ Excel</button><button class="btn" data-act="sync-all">Cập nhật trạng thái</button><a class="btn primary" href="#new-order">Tạo đơn</a></div></div>
   <div class="panel">
     <div class="toolbar"><input type="search" id="o-q" placeholder="Tìm mã đơn, tên, SĐT, SKU…" value="${esc(UI.q)}" aria-label="Tìm đơn">
       <select id="o-range" aria-label="Khoảng thời gian">${[['7','7 ngày'],['30','30 ngày'],['90','90 ngày'],['all','Tất cả']].map(([v,l]) => `<option value="${v}" ${UI.range===v?'selected':''}>${l}</option>`).join('')}</select></div>
@@ -800,11 +885,11 @@ function orderDetail(o){
       <dt>Số điện thoại</dt><dd><span class="mono">${esc(o.receiver.phone)}</span> <button class="btn sm ghost" data-act="copy" data-text="${esc(o.receiver.phone)}">Sao chép</button></dd>
       <dt>Địa chỉ</dt><dd>${esc([o.receiver.address, o.receiver.commune, o.receiver.district, o.receiver.province].filter(Boolean).join(', '))}</dd>
     </dl></section>
-    <section><h4>Sản phẩm</h4><div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>SKU</th><th>Tên</th><th class="num">SL</th><th class="num">Đơn giá</th><th class="num">Thành tiền</th></tr></thead><tbody>
-      ${o.items.map(i => `<tr><td class="mono">${esc(i.sku)}</td><td>${esc(i.name)}</td><td class="num">${i.qty}</td><td class="num">${fmtMoney(i.price)}</td><td class="num">${fmtMoney(i.price*i.qty)}</td></tr>`).join('')}
+    <section><h4>Sản phẩm</h4><div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>SKU</th><th>Tên</th><th class="num">SL</th></tr></thead><tbody>
+      ${o.items.map(i => `<tr><td class="mono">${esc(i.sku)}</td><td>${esc(i.name)}</td><td class="num">${i.qty}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">SuperShip không gửi kèm danh sách sản phẩm</td></tr>'}
     </tbody></table></div></section>
     <section><h4>Tiền & vận chuyển</h4><dl class="kv">
-      <dt>Tiền hàng</dt><dd>${fmtMoney(o.subtotal)}</dd>
+      <dt>Giá đơn hàng</dt><dd>${fmtMoney(o.subtotal)}</dd>
       <dt>Thu hộ (COD)</dt><dd><strong>${fmtMoney(o.amount)}</strong></dd>
       <dt>Giá trị khai báo</dt><dd>${fmtMoney(o.value)}</dd>
       <dt>Cân nặng</dt><dd>${fmtW(o.weight)}</dd>
@@ -823,11 +908,12 @@ function orderDetail(o){
 }
 
 // ---------- Trang: Tạo đơn ----------
-function blankForm(){ return {receiver:{name:'',phone:'',address:'',province:'',district:'',commune:''}, items:[{sku:'',name:'',qty:1,price:0,cost:0,weight:0}], amount:'', value:'', weight:'', payer:S.settings.payer, config:S.settings.config, note:'', fee:null}; }
-function formFromOrder(o, keepSoc){ return {receiver:{...o.receiver}, items:clone(o.items), amount:o.amount, value:o.value, weight:o.weight, payer:o.payer, config:o.config, note:o.note || '', fee:null}; }
+function blankForm(){ return {receiver:{name:'',phone:'',address:'',province:'',district:'',commune:''}, items:[{sku:'',name:'',qty:1,cost:0,weight:0}], price:'', amount:'', value:'', weight:'', payer:S.settings.payer, config:S.settings.config, note:'', fee:null}; }
+function formFromOrder(o, keepSoc){ return {receiver:{...o.receiver}, items:clone(o.items), price:o.subtotal ?? o.amount, amount:o.amount, value:o.value, weight:o.weight, payer:o.payer, config:o.config, note:o.note || '', fee:null}; }
 function totalsOf(f){
   const items = f.items.filter(i => i.sku && findProduct(i.sku)); const t = calcItems(items);
-  return { subtotal:t.subtotal, cost:t.cost, autoWeight:t.weight, weight: f.weight !== '' ? +f.weight : t.weight, value: f.value !== '' ? +f.value : t.subtotal, amount: f.amount !== '' ? +f.amount : t.subtotal };
+  const price = f.price !== '' ? +f.price || 0 : 0;
+  return { subtotal:price, cost:t.cost, autoWeight:t.weight, weight: f.weight !== '' ? +f.weight : t.weight, value: f.value !== '' ? +f.value : price, amount: f.amount !== '' ? +f.amount : price };
 }
 function vNewOrder(){
   if (!UI.form) UI.form = blankForm();
@@ -842,13 +928,20 @@ function vNewOrder(){
           <div class="field"><label for="f-name">Họ tên *</label><input type="text" id="f-name" data-bind="receiver.name" value="${esc(f.receiver.name)}"></div>
         </div>
         <div id="cust-hint"></div>
-        <div class="field"><label for="f-addr">Số nhà, đường *</label><input type="text" id="f-addr" data-bind="receiver.address" value="${esc(f.receiver.address)}" placeholder="Vd: 45 Lê Lợi"></div>
+        <div class="field"><label for="f-addr">Địa chỉ *</label><input type="text" id="f-addr" data-bind="receiver.address" value="${esc(f.receiver.address)}" placeholder="Vd: 45 Lê Lợi, P. Bến Thành, Q.1, TP.HCM" autocomplete="off"><span class="help" id="addr-hint">Gõ hoặc dán cả địa chỉ, CRM tự chọn tỉnh, quận, phường bên dưới.</span></div>
         ${areaPickerHTML('rc')}
       </div></div>
       <div class="panel"><div class="panel-h"><h3>Sản phẩm</h3><button type="button" class="btn sm" data-act="item-add">+ Thêm dòng</button></div>
         <div class="tbl-wrap" id="items"></div>
         <datalist id="sku-list">${S.products.map(p => `<option value="${esc(p.sku)}">${esc(p.name)}</option>`).join('')}</datalist>
       </div>
+      <div class="panel"><div class="panel-h"><h3>Giá đơn hàng</h3></div><div class="panel-b">
+        <div class="grid3">
+          <div class="field"><label for="f-price">Giá đơn hàng (₫) *</label><input type="number" id="f-price" class="num" min="0" step="1000" data-bind="price" value="${esc(f.price)}" placeholder="Vd: 450000"><span class="help">Tổng tiền hàng của cả đơn.</span></div>
+          <div class="field"><label for="f-amount">Thu hộ – COD (₫)</label><input type="number" id="f-amount" class="num" min="0" step="1000" data-bind="amount" value="${esc(f.amount)}" placeholder="${esc(f.price || 'Bằng giá đơn')}"><span class="help">Để trống = bằng giá đơn. Ghi 0 nếu khách đã chuyển khoản.</span></div>
+          <div class="field"><label for="f-value">Giá trị khai báo (₫)</label><input type="number" id="f-value" class="num" min="0" step="1000" data-bind="value" value="${esc(f.value)}" placeholder="${esc(f.price || 'Bằng giá đơn')}"><span class="help">Dùng tính bảo hiểm. Để trống = bằng giá đơn.</span></div>
+        </div>
+      </div></div>
       <div class="panel"><div class="panel-h"><h3>Giao hàng</h3></div><div class="panel-b stack">
         <div class="grid2">
           <div class="field"><label for="f-payer">Phí ship</label><select id="f-payer" data-bind="payer">${Object.entries(PAYER_OPTS).map(([k,v]) => `<option value="${k}" ${f.payer===k?'selected':''}>${v}</option>`).join('')}</select></div>
@@ -870,17 +963,19 @@ function afterNewOrder(){
     const [k1, k2] = b.split('.'); if (k2) UI.form[k1][k2] = e.target.value; else UI.form[k1] = e.target.value;
     e.target.classList.remove('err');
     if (b === 'receiver.phone') custHint();
+    if (b === 'receiver.address'){ clearTimeout(addrT); addrT = setTimeout(() => autoArea(false), 600); }
+    if (b === 'price'){ ['#f-amount','#f-value'].forEach(id => $(id).placeholder = e.target.value || 'Bằng giá đơn'); }
+    if (['price','amount','value'].includes(b)){ renderSummary(); if (b !== 'amount') scheduleFee(); }
   });
+  $('#f-addr').addEventListener('change', () => { clearTimeout(addrT); autoArea(true); });
 }
 function renderItems(){
   const f = UI.form;
-  $('#items').innerHTML = `<table class="tbl compact"><thead><tr><th style="min-width:150px">SKU</th><th>Tên sản phẩm</th><th class="num" style="width:80px">SL</th><th class="num" style="width:130px">Đơn giá</th><th class="num">Thành tiền</th><th></th></tr></thead><tbody>
+  $('#items').innerHTML = `<table class="tbl compact"><thead><tr><th style="min-width:150px">SKU</th><th>Tên sản phẩm</th><th class="num" style="width:90px">SL</th><th></th></tr></thead><tbody>
     ${f.items.map((i, k) => { const p = findProduct(i.sku); return `<tr>
       <td><input type="text" list="sku-list" data-item="sku" data-i="${k}" value="${esc(i.sku)}" placeholder="Vd: 2ROUGAL" class="mono ${i.sku && !p ? 'err' : ''}" aria-label="SKU dòng ${k+1}"></td>
       <td>${p ? esc(p.name) : i.sku ? '<span class="bad-txt sm">Không có SKU này trong danh sách sản phẩm</span>' : '<span class="muted sm">Chọn hoặc gõ SKU</span>'}</td>
       <td><input type="number" min="1" data-item="qty" data-i="${k}" value="${i.qty}" class="num" aria-label="Số lượng dòng ${k+1}"></td>
-      <td><input type="number" min="0" step="1000" data-item="price" data-i="${k}" value="${i.price}" class="num" aria-label="Đơn giá dòng ${k+1}"></td>
-      <td class="num" data-line="${k}">${fmtMoney(i.price*i.qty)}</td>
       <td><button type="button" class="btn sm ghost" data-act="item-del" data-i="${k}" aria-label="Xoá dòng">×</button></td></tr>`; }).join('')}
   </tbody></table>`;
   $$('#items [data-item]').forEach(inp => {
@@ -888,16 +983,15 @@ function renderItems(){
       const k = +e.target.dataset.i, fld = e.target.dataset.item, it = UI.form.items[k];
       if (fld === 'sku'){
         const parts = parseSkuText(e.target.value);
-        if (!parts.length){ Object.assign(it, {sku:'', name:'', price:0, cost:0, weight:0}); }
+        if (!parts.length){ Object.assign(it, {sku:'', name:'', cost:0, weight:0}); }
         else {
-          const rows = parts.map((pt, idx) => pt.product ? itemFromProduct(pt.product, pt.mult * (idx === 0 ? (+it.qty||1) : 1)) : {sku:pt.sku, name:'', qty:pt.mult, price:0, cost:0, weight:0});
+          const rows = parts.map((pt, idx) => pt.product ? itemFromProduct(pt.product, pt.mult * (idx === 0 ? (+it.qty||1) : 1)) : {sku:pt.sku, name:'', qty:pt.mult, cost:0, weight:0});
           UI.form.items.splice(k, 1, ...rows);
         }
         renderItems(); renderSummary(); scheduleFee();
       } else {
         it[fld] = Math.max(0, +e.target.value || 0);
-        const cell = $(`[data-line="${k}"]`); if (cell) cell.textContent = fmtMoney(it.price*it.qty);
-        renderSummary(); if (fld === 'qty') scheduleFee();
+        renderSummary(); scheduleFee();
       }
     });
   });
@@ -907,19 +1001,16 @@ function renderSummary(){
   const shipPaidByReceiver = f.payer === '2';
   const box = $('#sum'); if (!box) return;
   box.innerHTML = `
-    <div class="sumrow"><span>Tiền hàng</span><span>${fmtMoney(t.subtotal)}</span></div>
+    <div class="sumrow"><span>Giá đơn hàng</span><span>${f.price !== '' ? fmtMoney(t.subtotal) : '<span class="muted">Chưa nhập</span>'}</span></div>
+    <div class="sumrow"><span>Thu hộ (COD)</span><span>${fmtMoney(t.amount)}</span></div>
     <div class="sumrow"><label for="s-weight">Cân nặng (gram)</label><input type="number" id="s-weight" class="num" min="1" value="${f.weight !== '' ? f.weight : ''}" placeholder="${t.autoWeight}"></div>
-    <div class="sumrow"><label for="s-value">Giá trị khai báo</label><input type="number" id="s-value" class="num" min="0" step="1000" value="${f.value !== '' ? f.value : ''}" placeholder="${t.subtotal}"></div>
-    <div class="sumrow"><label for="s-amount">Thu hộ (COD)</label><input type="number" id="s-amount" class="num" min="0" step="1000" value="${f.amount !== '' ? f.amount : ''}" placeholder="${t.subtotal}"></div>
     <div class="sumrow"><span>Phí ship ước tính</span><span id="fee-out">${fee ? fmtMoney(fee.shipment) : '<span class="muted">Chọn địa chỉ để tính</span>'}</span></div>
     ${fee && fee.insurance ? `<div class="sumrow"><span>Phí bảo hiểm</span><span>${fmtMoney(fee.insurance)}</span></div>` : ''}
     <div class="sumrow total"><span>Shipper thu của khách</span><span>${fmtMoney(t.amount + (shipPaidByReceiver && fee ? fee.shipment + (fee.insurance||0) : 0))}</span></div>
-    <p class="muted sm" style="margin:6px 0 14px">${shipPaidByReceiver ? 'Người nhận trả phí: số thu = COD + phí ship (ước tính, SuperShip chốt khi tạo đơn).' : 'Người gửi trả phí: phí ship trừ vào tiền COD khi đối soát.'} Để trống các ô để tự tính theo sản phẩm.</p>
+    <p class="muted sm" style="margin:6px 0 14px">${shipPaidByReceiver ? 'Người nhận trả phí: số thu = COD + phí ship (ước tính, SuperShip chốt khi tạo đơn).' : 'Người gửi trả phí: phí ship trừ vào tiền COD khi đối soát.'} Để trống cân nặng để tự tính theo sản phẩm.</p>
     <div class="stack" style="gap:8px"><button type="button" class="btn primary" data-act="form-push">${UI.editId ? 'Lưu & đẩy lên SuperShip' : 'Tạo & đẩy lên SuperShip'}</button><button type="button" class="btn" data-act="form-save">Lưu nháp</button></div>`;
   $('#fee-eta').textContent = fee && fee.eta ? 'Dự kiến ' + fee.eta : '';
-  [['s-weight','weight'],['s-value','value'],['s-amount','amount']].forEach(([id, k]) => {
-    $('#'+id).addEventListener('change', e => { UI.form[k] = e.target.value === '' ? '' : Math.max(0, +e.target.value); renderSummary(); if (k !== 'amount') scheduleFee(); });
-  });
+  $('#s-weight').addEventListener('change', e => { UI.form.weight = e.target.value === '' ? '' : Math.max(0, +e.target.value); renderSummary(); scheduleFee(); });
 }
 let feeT, feeSeq = 0;
 function scheduleFee(){ clearTimeout(feeT); feeT = setTimeout(estimateFee, 450); }
@@ -954,13 +1045,14 @@ async function submitForm(push){
   ['province','district','commune'].forEach((k, i) => { if (!f.receiver[k]) errs.push(['#rc-prov','#rc-dist','#rc-comm'][i]); });
   const items = f.items.filter(i => i.sku);
   const badItem = !items.length || items.some(i => !findProduct(i.sku) || !(+i.qty > 0));
+  const noPrice = String(f.price).trim() === '' || +f.price < 0; if (noPrice) errs.push('#f-price');
   errs.forEach(s => $(s) && $(s).classList.add('err'));
-  if (errs.length || badItem){ toast(badItem ? 'Kiểm tra lại sản phẩm: cần ít nhất 1 SKU hợp lệ và số lượng > 0.' : 'Điền đủ các ô có dấu * và chọn đủ tỉnh, quận, phường.', 'bad'); return; }
+  if (errs.length || badItem){ toast(badItem ? 'Kiểm tra lại sản phẩm: cần ít nhất 1 SKU hợp lệ và số lượng > 0.' : noPrice && errs.length === 1 ? 'Nhập giá đơn hàng.' : 'Điền đủ các ô có dấu * và chọn đủ tỉnh, quận, phường.', 'bad'); return; }
   const t = totalsOf(f); const now = new Date().toISOString();
   let o = UI.editId ? S.orders.find(x => x.id === UI.editId) : null;
   if (!o){ o = {id:uid(), soc:nextSoc(now), createdAt:now, status:'draft', journeys:[], ssNotes:[], log:[], issue:{handled:false, note:''}, fee:{shipment:0, insurance:0, return:0}}; S.orders.unshift(o); addLog(o, 'Tạo đơn nháp'); }
   else addLog(o, 'Sửa đơn nháp');
-  Object.assign(o, {receiver:{...f.receiver, phone, name:f.receiver.name.trim(), address:f.receiver.address.trim()}, items:items.map(i => ({...i, qty:+i.qty, price:+i.price})), subtotal:t.subtotal, amount:t.amount, value:t.value, weight:t.weight, cost:t.cost, payer:f.payer, config:f.config, note:f.note.trim(), updatedAt:now});
+  Object.assign(o, {receiver:{...f.receiver, phone, name:f.receiver.name.trim(), address:f.receiver.address.trim()}, items:items.map(i => ({...i, qty:+i.qty})), subtotal:t.subtotal, amount:t.amount, value:t.value, weight:t.weight, cost:t.cost, payer:f.payer, config:f.config, note:f.note.trim(), updatedAt:now});
   if (f.fee) o.fee = {shipment:f.fee.shipment, insurance:f.fee.insurance, return:0};
   save();
   const btns = $$('#sum button'); btns.forEach(b => b.disabled = true);
@@ -991,6 +1083,12 @@ async function initAreaPicker(p, val, onChange){
   ps.onchange = async () => { ps.classList.remove('err'); fill(ds, [], '', 'Đang tải…'); fill(cs, [], '', 'Chọn quận trước'); emit(); if (ps.value){ try { fill(ds, await areaDistricts(ps.value), '', 'Chọn quận/huyện'); } catch(e){ toast(e.message,'bad'); } } };
   ds.onchange = async () => { ds.classList.remove('err'); fill(cs, [], '', 'Đang tải…'); emit(); if (ds.value){ try { fill(cs, await areaCommunes(ds.value), '', 'Chọn phường/xã'); } catch(e){ toast(e.message,'bad'); } } };
   cs.onchange = () => { cs.classList.remove('err'); emit(); };
+  ps._set = async v => {
+    fill(ps, await areaProvinces(), v.province, 'Chọn tỉnh/thành');
+    fill(ds, ps.value ? await areaDistricts(ps.value) : [], v.district, ps.value ? 'Chọn quận/huyện' : 'Chọn tỉnh trước');
+    fill(cs, ds.value ? await areaCommunes(ds.value) : [], v.commune, ds.value ? 'Chọn phường/xã' : 'Chọn quận trước');
+    [ps, ds, cs].forEach(x => x.classList.remove('err')); emit();
+  };
 }
 
 // ---------- Trang: Cần xử lý ----------
@@ -1054,9 +1152,9 @@ function customerDetail(c){
 // ---------- Trang: Sản phẩm ----------
 function vProducts(){
   return `<div class="page-head"><div><h1>Sản phẩm</h1><p>SKU gốc dùng khi tạo đơn. SKU gộp như “2ROUGAL” hay “ROUGAL*2” được tự quy đổi thành SKU gốc × số lượng, nên không cần tạo riêng.</p></div><button class="btn primary" data-act="prod-add">+ Thêm sản phẩm</button></div>
-  <div class="panel"><div class="tbl-wrap"><table class="tbl compact"><thead><tr><th style="min-width:150px">SKU</th><th style="min-width:240px">Tên sản phẩm</th><th class="num" style="min-width:120px">Giá bán (₫)</th><th class="num" style="min-width:120px">Giá vốn (₫)</th><th class="num" style="min-width:100px">Cân nặng (g)</th><th class="num">Đã bán 30 ngày</th><th></th></tr></thead><tbody>
+  <div class="panel"><div class="tbl-wrap"><table class="tbl compact"><thead><tr><th style="min-width:150px">SKU</th><th style="min-width:240px">Tên sản phẩm</th><th class="num" style="min-width:120px">Giá vốn (₫)</th><th class="num" style="min-width:100px">Cân nặng (g)</th><th class="num">Đã bán 30 ngày</th><th></th></tr></thead><tbody>
   ${S.products.map((p, i) => { const sold = sum(S.orders.filter(o => o.status !== '0' && +new Date(o.createdAt) > Date.now()-30*864e5), o => sum(o.items.filter(x => x.sku === p.sku), x => x.qty));
-    return `<tr><td><input type="text" class="mono" data-prod="${i}" data-f="sku" value="${esc(p.sku)}" aria-label="SKU"></td><td><input type="text" data-prod="${i}" data-f="name" value="${esc(p.name)}" aria-label="Tên"></td><td><input type="number" class="num" min="0" step="1000" data-prod="${i}" data-f="price" value="${p.price}" aria-label="Giá bán"></td><td><input type="number" class="num" min="0" step="1000" data-prod="${i}" data-f="cost" value="${p.cost||0}" aria-label="Giá vốn"></td><td><input type="number" class="num" min="1" data-prod="${i}" data-f="weight" value="${p.weight}" aria-label="Cân nặng"></td><td class="num">${fmtNum(sold)}</td><td><button class="btn sm ghost" data-act="prod-del" data-i="${i}" aria-label="Xoá">×</button></td></tr>`; }).join('') || '<tr><td colspan="7" class="empty">Chưa có sản phẩm. Thêm sản phẩm trước khi tạo đơn.</td></tr>'}
+    return `<tr><td><input type="text" class="mono" data-prod="${i}" data-f="sku" value="${esc(p.sku)}" aria-label="SKU"></td><td><input type="text" data-prod="${i}" data-f="name" value="${esc(p.name)}" aria-label="Tên"></td><td><input type="number" class="num" min="0" step="1000" data-prod="${i}" data-f="cost" value="${p.cost||0}" aria-label="Giá vốn"></td><td><input type="number" class="num" min="1" data-prod="${i}" data-f="weight" value="${p.weight}" aria-label="Cân nặng"></td><td class="num">${fmtNum(sold)}</td><td><button class="btn sm ghost" data-act="prod-del" data-i="${i}" aria-label="Xoá">×</button></td></tr>`; }).join('') || '<tr><td colspan="6" class="empty">Chưa có sản phẩm. Thêm sản phẩm trước khi tạo đơn.</td></tr>'}
   </tbody></table></div></div>
   <p class="muted sm" style="margin-top:10px">Giá vốn chỉ dùng để tính lãi gộp trong trang Đối soát COD, không gửi sang SuperShip.</p>`;
 }
@@ -1098,11 +1196,16 @@ function vConfig(){
       <div class="row wrap"><button class="btn" data-act="cfg-test">Kiểm tra kết nối</button><span id="cfg-test-out" class="sm"></span></div>
       <div class="note">
         <strong>Lưu ý khi dùng thật</strong><br>
-        • Token được lưu trong trình duyệt này. Chỉ dùng trên máy của bạn, đừng gửi file sao lưu cho người lạ.<br>
-        • Bản xem trên Claude chỉ chạy được chế độ demo. Để dùng thật, mở file <code>crm-don-hang.html</code> bằng Chrome trên máy.<br>
+        • Token được lưu trong DB trên server, chỉ người đăng nhập CRM mới xem được. File sao lưu không kèm token.<br>
         • Nếu “Kiểm tra kết nối” báo không kết nối được, SuperShip đang chặn gọi trực tiếp từ trình duyệt (CORS). Khi đó cần một proxy nhỏ, ví dụ Cloudflare Worker miễn phí chuyển tiếp tới <code>api.mysupership.vn</code>, rồi điền địa chỉ proxy vào ô Địa chỉ API.<br>
-        • Trang web tĩnh không nhận được webhook, nên CRM cập nhật trạng thái bằng cách hỏi SuperShip (nút “Cập nhật trạng thái” hoặc tự động bên dưới).
+        • Nên đăng ký webhook ở mục bên dưới để SuperShip tự báo trạng thái. Nút “Cập nhật trạng thái” vẫn dùng được để hỏi lại khi cần.
       </div>
+    </div></div>
+
+    <div class="panel"><div class="panel-h"><h3>Nhận đơn từ SuperShip (webhook)</h3></div><div class="panel-b stack">
+      <p class="muted">Đăng ký một lần: mọi đơn trên tài khoản SuperShip, kể cả đơn tạo trực tiếp trên trang SuperShip, sẽ tự về CRM và tự cập nhật trạng thái mỗi khi có thay đổi. Cần nhập token và tắt chế độ demo trước.</p>
+      <div class="row wrap"><button class="btn primary" data-act="hook-register" ${s.demo || !s.token ? 'disabled' : ''}>Đăng ký webhook với SuperShip</button><button class="btn" data-act="hook-check" ${s.demo || !s.token ? 'disabled' : ''}>Kiểm tra</button></div>
+      <div id="hook-out" class="sm"></div>
     </div></div>
 
     <div class="panel"><div class="panel-h"><h3>Kho lấy hàng</h3><button class="btn sm" data-act="cfg-wh-load">Tải danh sách kho từ SuperShip</button></div><div class="panel-b stack">
@@ -1163,13 +1266,13 @@ function renderWarehouses(){
 }
 
 // ---------- Nhập đơn từ Excel ----------
-const IMPORT_HEADERS = ['Tên người nhận','Số điện thoại','Địa chỉ','Phường/Xã','Quận/Huyện','Tỉnh/Thành phố','SKU','Thu hộ (COD)','Ghi chú'];
+const IMPORT_HEADERS = ['Tên người nhận','Số điện thoại','Địa chỉ','Phường/Xã','Quận/Huyện','Tỉnh/Thành phố','SKU','Giá đơn hàng','Thu hộ (COD)','Ghi chú'];
 const normKey = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/đ/gi,'d').toLowerCase().replace(/[^a-z0-9]/g,'');
-const KEYMAP = {tennguoinhan:'name', ten:'name', hoten:'name', nguoinhan:'name', sodienthoai:'phone', sdt:'phone', dienthoai:'phone', diachi:'address', phuongxa:'commune', phuong:'commune', xa:'commune', quanhuyen:'district', quan:'district', huyen:'district', tinhthanhpho:'province', tinh:'province', tinhthanh:'province', thanhpho:'province', sku:'sku', masp:'sku', sanpham:'sku', thuhocod:'amount', thuho:'amount', cod:'amount', ghichu:'note'};
+const KEYMAP = {tennguoinhan:'name', ten:'name', hoten:'name', nguoinhan:'name', sodienthoai:'phone', sdt:'phone', dienthoai:'phone', diachi:'address', phuongxa:'commune', phuong:'commune', xa:'commune', quanhuyen:'district', quan:'district', huyen:'district', tinhthanhpho:'province', tinh:'province', tinhthanh:'province', thanhpho:'province', sku:'sku', masp:'sku', sanpham:'sku', giadonhang:'price', giadon:'price', gia:'price', giaban:'price', tienhang:'price', tongtien:'price', thuhocod:'amount', thuho:'amount', cod:'amount', ghichu:'note'};
 function openImport(){
   openModal(`<div class="row between"><h3>Nhập đơn từ Excel</h3><button class="icon-btn" data-act="modal-close" aria-label="Đóng">×</button></div>
-    <p class="muted">Mỗi dòng là một đơn. Cột SKU có thể ghi nhiều sản phẩm, vd <span class="mono">2ROUGAL + 1PHANA-1L</span>. Để trống cột Thu hộ thì lấy theo giá bán. Đơn được tạo ở dạng nháp để bạn kiểm tra rồi đẩy hàng loạt.</p>
-    <div class="tbl-wrap"><table class="tbl compact"><thead><tr>${IMPORT_HEADERS.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody><tr><td>Nguyễn Văn A</td><td class="mono">0912345678</td><td>45 Lê Lợi</td><td>Phường Bến Thành</td><td>Quận 1</td><td>Thành phố Hồ Chí Minh</td><td class="mono">2ROUGAL</td><td></td><td>Gọi trước</td></tr></tbody></table></div>
+    <p class="muted">Mỗi dòng là một đơn. Cột SKU có thể ghi nhiều sản phẩm, vd <span class="mono">2ROUGAL + 1PHANA-1L</span>. Để trống cột Thu hộ thì thu bằng giá đơn hàng. Đơn được tạo ở dạng nháp để bạn kiểm tra rồi đẩy hàng loạt.</p>
+    <div class="tbl-wrap"><table class="tbl compact"><thead><tr>${IMPORT_HEADERS.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody><tr><td>Nguyễn Văn A</td><td class="mono">0912345678</td><td>45 Lê Lợi</td><td>Phường Bến Thành</td><td>Quận 1</td><td>Thành phố Hồ Chí Minh</td><td class="mono">2ROUGAL</td><td class="num">900000</td><td></td><td>Gọi trước</td></tr></tbody></table></div>
     <div class="row wrap">${isEmbedded ? `<button class="btn sm" data-act="copy" data-text="${esc(IMPORT_HEADERS.join('\t'))}">Sao chép dòng tiêu đề để dán vào Excel</button>` : `<button class="btn sm" data-act="tpl-download">Tải file mẫu</button>`}
       <label class="btn primary" for="imp-file">Chọn file Excel / CSV</label><input type="file" id="imp-file" accept=".xlsx,.xls,.csv" hidden></div>
     <div id="imp-out"></div>`);
@@ -1188,7 +1291,9 @@ function readImport(file){
         const phone = normPhone(r.phone); if (r.phone && (phone.length < 9 || phone.length > 11)) errs.push('SĐT sai');
         const parts = parseSkuText(r.sku); const bad = parts.filter(p => !p.product); if (bad.length) errs.push('không có SKU ' + bad.map(b => b.sku).join(', '));
         const items = []; parts.filter(p => p.product).forEach(p => { const ex = items.find(i => i.sku === p.sku); if (ex) ex.qty += p.mult; else items.push(itemFromProduct(p.product, p.mult)); });
-        const t = calcItems(items); const amt = r.amount ? +String(r.amount).replace(/[^\d]/g,'') : t.subtotal;
+        const money = v => +String(v||'').replace(/[^\d]/g,'') || 0;
+        if (!r.price && !r.amount) errs.push('thiếu giá đơn hàng');
+        const t = calcItems(items); t.subtotal = r.price ? money(r.price) : money(r.amount); const amt = r.amount ? money(r.amount) : t.subtotal;
         return {r:{...r, phone}, items, t, amount:amt, errs};
       }).filter(x => Object.keys(x.r).length > 1);
       renderImportPreview();
@@ -1216,6 +1321,42 @@ function createImported(){
   toast(`Đã tạo ${good.length} đơn nháp và chọn sẵn. Bấm “Đẩy lên SuperShip” để gửi.`, 'ok', 6000); go('orders');
 }
 
+// ---------- Kéo đơn từ SuperShip ----------
+function openPull(){
+  openModal(`<div class="row between"><h3>Kéo đơn từ SuperShip</h3><button class="icon-btn" data-act="modal-close" aria-label="Đóng">×</button></div>
+    <p class="muted">SuperShip không cho lấy cả danh sách đơn qua API, nên có 2 cách:</p>
+    <p><strong>Tự động:</strong> vào <a href="#config">Cài đặt → Nhận đơn từ SuperShip</a> đăng ký webhook một lần. Từ đó mọi đơn, kể cả đơn tạo trên trang SuperShip, tự về CRM khi đổi trạng thái.</p>
+    <p><strong>Theo mã:</strong> dán mã đơn SuperShip (mỗi dòng một mã, hoặc cách nhau bằng dấu phẩy) để kéo các đơn đã có. Đơn đã có trong CRM sẽ được cập nhật, không bị trùng.</p>
+    <div class="field"><label for="pull-codes">Mã đơn SuperShip</label><textarea id="pull-codes" class="mono" rows="6" placeholder="SGNS123456789&#10;SGNS987654321"></textarea></div>
+    <div class="row end"><button class="btn ghost" data-act="modal-close">Đóng</button><button class="btn primary" id="pull-run" data-act="pull-run">Kéo đơn</button></div>`);
+  $('#pull-codes').focus();
+}
+async function pullFromSuperShip(btn){
+  const codes = [...new Set($('#pull-codes').value.toUpperCase().match(/[A-Z0-9][A-Z0-9_-]{5,}/g) || [])];
+  if (!codes.length) return toast('Dán ít nhất một mã đơn SuperShip.', 'warn');
+  if (S.settings.demo) return toast('Đang ở chế độ demo. Tắt demo và nhập token trong Cài đặt để kéo đơn thật.', 'warn', 6000);
+  btn.disabled = true; btn.textContent = `Đang kéo ${codes.length} đơn…`;
+  try {
+    await flush(true);
+    const r = await serverApi('POST', 'api/supership/pull', {codes});
+    mergeOrders(r.orders); closeModal(); render();
+    const errs = r.errors.length ? ` ${r.errors.length} mã lỗi: ` + r.errors.slice(0, 3).map(e => `${e.code} (${e.error})`).join('; ') : '';
+    toast(`Đã kéo ${r.orders.length} đơn từ SuperShip.${errs}`, r.errors.length ? 'warn' : 'ok', r.errors.length ? 10000 : 5000);
+  } catch(e) { toast(e.message, 'bad', 7000); btn.disabled = false; btn.textContent = 'Kéo đơn'; }
+}
+async function hookInfo(register){
+  const out = $('#hook-out'); out.className = 'sm'; out.textContent = register ? 'Đang đăng ký…' : 'Đang kiểm tra…';
+  try {
+    await flush(true);
+    const r = await serverApi(register ? 'POST' : 'GET', 'api/supership/webhook');
+    const cur = r.current || {}; const curUrl = cur.url || (Array.isArray(cur) && cur[0] && cur[0].url) || '';
+    out.innerHTML = `<div>Địa chỉ webhook của CRM: <span class="mono">${esc(r.url)}</span></div>` +
+      (cur.error ? `<div class="bad-txt">Không đọc được webhook trên SuperShip: ${esc(cur.error)}</div>`
+        : curUrl === r.url ? `<div class="ok-txt">${register ? 'Đã đăng ký. ' : ''}SuperShip đang gửi đơn về CRM này.</div>`
+        : `<div class="warn-txt">SuperShip ${curUrl ? 'đang gửi webhook tới địa chỉ khác: <span class="mono">' + esc(curUrl) + '</span>' : 'chưa có webhook'}.</div>`);
+  } catch(e) { out.className = 'sm bad-txt'; out.textContent = e.message; }
+}
+
 // ---------- Sao lưu ----------
 function exportData(){
   const data = JSON.stringify(Object.assign({}, S, {settings:Object.assign({}, S.settings, {token:''})}), null, 1);
@@ -1238,8 +1379,12 @@ const H = {
   'sync-all': () => syncMany(activeOrders()),
   'sync-issues': () => syncMany(issueOrders(true)),
   'import-open': () => openImport(),
+  'pull-open': () => openPull(),
+  'pull-run': a => pullFromSuperShip(a),
+  'hook-check': () => hookInfo(false),
+  'hook-register': () => confirmBox('Đăng ký webhook?', 'SuperShip sẽ gửi mọi thay đổi đơn hàng về CRM này. Nếu tài khoản SuperShip đang gửi webhook cho hệ thống khác, địa chỉ cũ sẽ bị thay.', 'Đăng ký', () => hookInfo(true)),
   'import-create': () => createImported(),
-  'tpl-download': () => { if (typeof XLSX === 'undefined') return toast('Chưa tải được thư viện Excel.', 'bad'); const ws = XLSX.utils.aoa_to_sheet([IMPORT_HEADERS, ['Nguyễn Văn A','0912345678','45 Lê Lợi','Phường Bến Thành','Quận 1','Thành phố Hồ Chí Minh','2ROUGAL','','Gọi trước khi giao']]); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Don hang'); XLSX.writeFile(wb, 'mau-nhap-don.xlsx'); },
+  'tpl-download': () => { if (typeof XLSX === 'undefined') return toast('Chưa tải được thư viện Excel.', 'bad'); const ws = XLSX.utils.aoa_to_sheet([IMPORT_HEADERS, ['Nguyễn Văn A','0912345678','45 Lê Lợi','Phường Bến Thành','Quận 1','Thành phố Hồ Chí Minh','2ROUGAL','900000','','Gọi trước khi giao']]); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Don hang'); XLSX.writeFile(wb, 'mau-nhap-don.xlsx'); },
   'bulk-clear': () => { UI.sel.clear(); renderOrdersBody(); },
   'bulk-push': async () => { const list = S.orders.filter(o => UI.sel.has(o.id) && o.status === 'draft'); const r = await runMany(list, pushOrder, 'Đẩy đơn'); if (r.ok) toast(`Đã đẩy ${r.ok} đơn lên SuperShip.`, 'ok'); UI.sel.clear(); render(); },
   'bulk-sync': () => syncMany(S.orders.filter(o => UI.sel.has(o.id) && o.ssCode)),
@@ -1257,8 +1402,8 @@ const H = {
   'issue-save': a => { const o = S.orders.find(x => x.id === a.dataset.id); const v = $('#iss-' + o.id).value.trim(); o.issue = Object.assign({handled:false}, o.issue, {note:v}); if (v) addLog(o, 'Xử lý: ' + v); save(); toast('Đã lưu ghi chú.', 'ok', 1500); },
   'issue-done': a => { const o = S.orders.find(x => x.id === a.dataset.id); const v = $('#iss-' + o.id).value.trim(); o.issue = {handled:true, note:v}; addLog(o, 'Đánh dấu đã xử lý' + (v ? ': ' + v : '')); save(); render(); },
   'issue-undo': a => { const o = S.orders.find(x => x.id === a.dataset.id); o.issue = Object.assign({}, o.issue, {handled:false}); save(); render(); },
-  'item-add': () => { UI.form.items.push({sku:'', name:'', qty:1, price:0, cost:0, weight:0}); renderItems(); const ins = $$('#items [data-item="sku"]'); ins[ins.length-1].focus(); },
-  'item-del': a => { UI.form.items.splice(+a.dataset.i, 1); if (!UI.form.items.length) UI.form.items.push({sku:'', name:'', qty:1, price:0, cost:0, weight:0}); renderItems(); renderSummary(); scheduleFee(); },
+  'item-add': () => { UI.form.items.push({sku:'', name:'', qty:1, cost:0, weight:0}); renderItems(); const ins = $$('#items [data-item="sku"]'); ins[ins.length-1].focus(); },
+  'item-del': a => { UI.form.items.splice(+a.dataset.i, 1); if (!UI.form.items.length) UI.form.items.push({sku:'', name:'', qty:1, cost:0, weight:0}); renderItems(); renderSummary(); scheduleFee(); },
   'fill-cust': a => { const c = customerMap().get(a.dataset.phone); if (!c) return; Object.assign(UI.form.receiver, {...c.receiver}); render(); },
   'form-save': () => submitForm(false),
   'form-push': () => submitForm(true),
@@ -1266,7 +1411,7 @@ const H = {
   'cust-filter': a => { UI.custF = a.dataset.f; render(); },
   'cust-tag': a => { const m = custMeta(a.dataset.phone); const t = a.dataset.tag; m.tags = m.tags.includes(t) ? m.tags.filter(x => x !== t) : [...m.tags, t]; save(); render(); },
   'cust-new-order': a => { const c = customerMap().get(a.dataset.phone); UI.form = blankForm(); UI.form.receiver = {...c.receiver}; UI.editId = null; closeDrawer(); go('new-order'); },
-  'prod-add': () => { S.products.push({sku:'SKU' + (S.products.length + 1), name:'Sản phẩm mới', price:0, cost:0, weight:500}); save(); render(); const ins = $$('[data-f="sku"]'); ins[ins.length-1].select(); },
+  'prod-add': () => { S.products.push({sku:'SKU' + (S.products.length + 1), name:'Sản phẩm mới', cost:0, weight:500}); save(); render(); const ins = $$('[data-f="sku"]'); ins[ins.length-1].select(); },
   'prod-del': a => { const p = S.products[+a.dataset.i]; confirmBox('Xoá sản phẩm ' + p.sku + '?', 'Các đơn cũ vẫn giữ thông tin sản phẩm này.', 'Xoá', () => { S.products.splice(+a.dataset.i, 1); save(); render(); }, true); },
   'cfg-test': async a => { const out = $('#cfg-test-out'); out.className = 'sm'; out.textContent = 'Đang kiểm tra…'; a.disabled = true;
     try { const r = await api('GET','/v1/partner/orders/status'); out.className = 'sm ok-txt'; out.textContent = `Kết nối được${S.settings.demo ? ' (demo)' : ''}: nhận ${(r.results||[]).length} trạng thái đơn.`; } catch(e) { out.className = 'sm bad-txt'; out.textContent = e.message; } a.disabled = false; },
@@ -1288,7 +1433,7 @@ document.addEventListener('change', e => {
   if (t.dataset.sel){ t.checked ? UI.sel.add(t.dataset.sel) : UI.sel.delete(t.dataset.sel); renderOrdersBody(); }
   else if (t.dataset.prod !== undefined){ const p = S.products[+t.dataset.prod]; const f = t.dataset.f; let v = t.value.trim();
     if (f === 'sku'){ v = v.toUpperCase().replace(/\s+/g,''); if (!v || S.products.some((x, i) => i !== +t.dataset.prod && x.sku === v)){ toast('SKU trống hoặc bị trùng.', 'bad'); t.value = p.sku; return; } t.value = v; }
-    p[f] = ['price','cost','weight'].includes(f) ? Math.max(0, +v || 0) : v; save(); }
+    p[f] = ['cost','weight'].includes(f) ? Math.max(0, +v || 0) : v; save(); }
   else if (t.id === 'cust-note'){ custMeta(t.dataset.phone).note = t.value.trim(); save(); toast('Đã lưu ghi chú khách.', 'ok', 1500); }
   else if (t.id === 'show-done'){ UI.showDone = t.checked; render(); }
 });
@@ -1299,6 +1444,8 @@ document.addEventListener('mousemove', e => { const t = e.target.closest && e.ta
 window.addEventListener('hashchange', () => { if (!S) return; closeModal(); render(); window.scrollTo(0, 0); });
 
 // tự cập nhật trạng thái
+setInterval(pollServer, 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollServer(); });
 setInterval(() => { if (!S) return; const m = +S.settings.autoSync; if (!m || UI.busy) return; if (Date.now() - UI.lastAuto < m*60000) return; UI.lastAuto = Date.now(); syncMany(activeOrders(), true); }, 30000);
 
 load().then(() => {
