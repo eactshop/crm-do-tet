@@ -81,6 +81,11 @@ a{color:var(--accent)}
 .kpi .val{font-size:24px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .kpi .sub{font-size:12px;color:var(--muted)}
 .kpi.alert .val{color:var(--bad)}
+.kpi.hl{border-color:var(--ink)}
+.kpi .val.sm-val{font-size:20px}
+.tbl tfoot td{font-weight:600;border-top:1px solid var(--line-2);padding:10px 12px;background:var(--surface-2)}
+.pl td{padding:9px 12px} .pl .op{color:var(--muted);width:18px;font-family:'JetBrains Mono',monospace} .pl tr.total td{font-weight:700;border-top:1px solid var(--line-2)}
+.ch-list{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 14px;border-radius:7px;border:1px solid var(--line-2);background:var(--surface);color:var(--ink);font:inherit;font-weight:500;cursor:pointer;white-space:nowrap;text-decoration:none}
 .btn:hover{background:var(--surface-2)}
@@ -97,7 +102,7 @@ a{color:var(--accent)}
 .field{display:flex;flex-direction:column;gap:5px;min-width:0}
 .field label{font-size:12px;font-weight:500;color:var(--ink-2)}
 .field .help{font-size:12px;color:var(--muted)}
-input[type=text],input[type=tel],input[type=number],input[type=password],input[type=search],input[type=url],select,textarea{
+input[type=text],input[type=tel],input[type=number],input[type=password],input[type=search],input[type=url],input[type=date],input[type=month],select,textarea{
   width:100%;height:36px;padding:0 10px;border:1px solid var(--line-2);border-radius:7px;background:var(--surface);color:var(--ink);font:inherit;min-width:0}
 textarea{height:auto;min-height:72px;padding:8px 10px;resize:vertical}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
@@ -289,13 +294,14 @@ const isEmbedded = (() => { try { return window.self !== window.top; } catch(e) 
 // ---------- Trạng thái ứng dụng ----------
 const KEY = 'crm-don-hang-supership-v1';
 let S;
-const UI = { group:'all', q:'', range:'30', sel:new Set(), form:null, editId:null, drawer:null, custQ:'', custF:'all', showDone:false, importRows:null, warehouses:null, lastAuto:Date.now(), busy:false, rev:0 };
+const UI = { group:'all', q:'', range:'30', sel:new Set(), form:null, editId:null, drawer:null, custQ:'', custF:'all', showDone:false, importRows:null, warehouses:null, lastAuto:Date.now(), busy:false, rev:0, period:(() => { try { return localStorage.getItem('crm-don-hang-supership-v1-period'); } catch(e) { return null; } })() || 'month' };
 
 function defaults(){
   return { version:1, sample:false, seq:0,
     settings:{ demo:true, apiBase:'https://api.mysupership.vn', token:'', payer:'2', config:'1', printSize:'A5', autoSync:0, prefix:'DH',
       pickup:{code:'',name:'',contact:'',phone:'',address:'',province:'',district:'',commune:''} },
-    products:[], orders:[], customers:{}, areas:{province:null, district:{}, commune:{}} };
+    products:[], orders:[], customers:{}, areas:{province:null, district:{}, commune:{}},
+    ads:[], adNotes:{}, adChannels:[...AD_CHANNELS] };
 }
 function setState(d){ S = Object.assign(defaults(), d); S.settings = Object.assign(defaults().settings, d.settings||{}); S.settings.pickup = Object.assign(defaults().settings.pickup, (d.settings||{}).pickup||{}); }
 async function load(){
@@ -737,6 +743,7 @@ const VIEWS = {
   'issues':{label:'Cần xử lý', render:vIssues},
   'customers':{label:'Khách hàng', render:vCustomers, after:afterCustomers},
   'products':{label:'Sản phẩm', render:vProducts},
+  'ads':{label:'Quảng cáo', render:vAds, after:afterAds},
   'cod':{label:'Đối soát COD', render:vCod},
   'config':{label:'Cài đặt', render:vConfig, after:afterConfig},
 };
@@ -746,7 +753,7 @@ function renderNav(v){
   const issues = issueOrders(false).length;
   $('#side').innerHTML = `<div class="brand"><b>Sổ Đơn</b><span class="mode ${S.settings.demo?'':'live'}"><i></i>${S.settings.demo?'Chế độ demo':'Đang kết nối thật'}</span></div>
     ${Object.entries(VIEWS).map(([k, x]) => `<a class="nav ${k===v?'on':''}" href="#${k}"><span>${x.label}</span>${k==='issues' && issues ? `<span class="badge">${issues}</span>` : ''}</a>`).join('')}
-    <div class="side-foot">Đồng bộ với SuperShip API. Dữ liệu lưu trên trình duyệt này – nhớ sao lưu định kỳ trong Cài đặt.</div>`;
+    <div class="side-foot">Đồng bộ với SuperShip API. Dữ liệu lưu trong DB trên server – vẫn nên sao lưu định kỳ trong Cài đặt.</div>`;
 }
 function banner(){
   if (!S.sample && !S.settings.demo) return '';
@@ -762,43 +769,88 @@ function render(){
 function rerender(keepForm){ if (keepForm && currentView() === 'new-order'){ renderNav('new-order'); renderDrawer(); return; } render(); }
 
 // ---------- Trang: Tổng quan ----------
+// ---------- Số liệu theo kỳ: doanh thu, phí ship, giá vốn, quảng cáo, lợi nhuận ----------
+const DAY = 864e5;
+const dayKey = x => { const d = new Date(x); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const PERIODS = [['today','Hôm nay'],['yesterday','Hôm qua'],['week','Tuần này'],['month','Tháng này'],['lastmonth','Tháng trước']];
+function periodRange(p){
+  const t = new Date(); t.setHours(0,0,0,0);
+  if (p === 'today') return [+t, +t + DAY];
+  if (p === 'yesterday') return [+t - DAY, +t];
+  if (p === 'week') return [+t - ((t.getDay() + 6) % 7) * DAY, +t + DAY];
+  if (p === 'lastmonth') return [+new Date(t.getFullYear(), t.getMonth() - 1, 1), +new Date(t.getFullYear(), t.getMonth(), 1)];
+  return [+new Date(t.getFullYear(), t.getMonth(), 1), +t + DAY];
+}
+// Phí ship shop phải trả: người gửi trả phí thì cả phí ship + bảo hiểm + hoàn; người nhận trả thì chỉ mất phí khi đơn hoàn
+function shipCostOf(o){
+  const f = o.fee || {};
+  if (o.payer === '1') return (f.shipment||0) + (f.insurance||0) + (f.return||0);
+  return RETURN_GROUPS.includes(groupOf(o.status).id) ? (f.shipment||0) + (f.return||0) : 0;
+}
+function statsFor(a, b){
+  const list = S.orders.filter(o => o.status !== 'draft' && o.status !== '0' && +new Date(o.createdAt) >= a && +new Date(o.createdAt) < b);
+  const gid = o => groupOf(o.status).id;
+  const ret = list.filter(o => RETURN_GROUPS.includes(gid(o))); const lost = list.filter(o => gid(o) === 'incident');
+  const sold = list.filter(o => !RETURN_GROUPS.includes(gid(o)) && gid(o) !== 'incident');
+  const ka = dayKey(a), kb = dayKey(b - 1);
+  const revenue = sum(sold, o => o.subtotal ?? o.amount), ship = sum(list, shipCostOf), cost = sum(sold, o => o.cost);
+  const ads = sum((S.ads || []).filter(x => x.date >= ka && x.date <= kb), x => x.amount);
+  return { list, sold, ret, lost, ok:sold.filter(o => gid(o) === 'success').length, revenue, ship, cost, ads, profit:revenue - ship - cost - ads, noCost:sold.filter(o => !(+o.cost)).length };
+}
+const pct = (a, b) => b ? (a / b * 100).toFixed(1).replace('.', ',') + '%' : '—';
+
+// ---------- Trang: Tổng quan ----------
 function vOverview(){
-  const now = Date.now(); const d30 = now - 30*864e5;
-  const real = S.orders.filter(o => o.status !== 'draft');
-  const recent = real.filter(o => +new Date(o.createdAt) >= d30);
-  const ok = recent.filter(o => groupOf(o.status).id === 'success').length;
-  const ret = recent.filter(o => RETURN_GROUPS.includes(groupOf(o.status).id)).length;
-  const rate = ok + ret ? ok / (ok + ret) : null;
+  const per = UI.period || 'month'; const [a, b] = periodRange(per); const st = statsFor(a, b);
+  const perName = PERIODS.find(x => x[0] === per)[1].toLowerCase();
+  const rate = st.ok + st.ret.length ? st.ok / (st.ok + st.ret.length) : null;
   const codWait = S.orders.filter(o => ['12','13'].includes(o.status));
   const issues = issueOrders(false);
-  // biểu đồ 14 ngày
-  const days = []; const today = new Date(); today.setHours(0,0,0,0);
-  for (let i = 13; i >= 0; i--){ const d = new Date(+today - i*864e5); days.push({d, n:0, cod:0}); }
-  for (const o of S.orders){ const t = new Date(o.createdAt); t.setHours(0,0,0,0); const x = days.find(y => +y.d === +t); if (x){ x.n++; x.cod += +o.amount||0; } }
+  // biểu đồ theo ngày của kỳ; kỳ ngắn hơn 7 ngày thì xem 14 ngày gần nhất
+  const c0 = (b - a) / DAY < 7 ? b - 14*DAY : a;
+  const days = []; for (let t = c0; t < b; t += DAY){ const x = statsFor(t, t + DAY); days.push({d:new Date(t), n:x.list.length, cod:x.revenue}); }
   // nhóm trạng thái
   const gCount = GROUPS.map(g => ({g, n:S.orders.filter(o => g.codes.includes(o.status)).length})).filter(x => x.n);
   const gMax = Math.max(1, ...gCount.map(x => x.n));
-  // top sản phẩm
+  // top sản phẩm trong kỳ
   const prod = {};
-  for (const o of recent) if (o.status !== '0') for (const i of o.items){ const p = prod[i.sku || i.name] = prod[i.sku || i.name] || {sku:i.sku, name:i.name, qty:0, n:0}; p.qty += +i.qty; p.n++; }
+  for (const o of st.list) for (const i of o.items){ const p = prod[i.sku || i.name] = prod[i.sku || i.name] || {sku:i.sku, name:i.name, qty:0, n:0}; p.qty += +i.qty; p.n++; }
   const top = Object.values(prod).sort((a,b) => b.qty - a.qty).slice(0, 6);
-  return `<div class="page-head"><div><h1>Tổng quan</h1><p>Tình hình giao hàng 30 ngày gần nhất.</p></div><div class="row"><button class="btn" data-act="sync-all">Cập nhật trạng thái</button><a class="btn primary" href="#new-order">Tạo đơn</a></div></div>
+  const plRow = (op, label, v, sub) => `<tr><td class="op">${op}</td><td>${label}${sub ? `<div class="muted sm">${sub}</div>` : ''}</td><td class="num">${fmtMoney(v)}</td></tr>`;
+  return `<div class="page-head"><div><h1>Tổng quan</h1><p>Số liệu đơn tạo trong ${perName} (${fmtDay(new Date(a))}${b - a > DAY ? ' – ' + fmtDay(new Date(b - 1)) : ''}).</p></div><div class="row"><button class="btn" data-act="sync-all">Cập nhật trạng thái</button><a class="btn primary" href="#new-order">Tạo đơn</a></div></div>
+  <div class="chips" style="margin-bottom:14px">${PERIODS.map(([k, l]) => `<button class="chip ${per===k?'on':''}" data-act="period" data-p="${k}">${l}</button>`).join('')}</div>
   <div class="kpis">
-    <div class="kpi"><span class="lbl">Đơn đã gửi, 30 ngày</span><span class="val">${fmtNum(recent.length)}</span><span class="sub">${fmtNum(S.orders.filter(o=>o.status==='draft').length)} đơn nháp chưa đẩy</span></div>
-    <div class="kpi"><span class="lbl">Tỉ lệ giao thành công</span><span class="val">${rate == null ? '—' : (rate*100).toFixed(1).replace('.',',') + '%'}</span><span class="sub">${ok} thành công · ${ret} hoàn</span></div>
-    <div class="kpi"><span class="lbl">COD chờ đối soát</span><span class="val">${fmtMoney(sum(codWait, o => o.amount))}</span><span class="sub">${codWait.length} đơn đã giao, chưa đối soát</span></div>
+    <div class="kpi"><span class="lbl">Doanh thu</span><span class="val sm-val">${fmtMoney(st.revenue)}</span><span class="sub">${st.sold.length} đơn, không tính huỷ, hoàn</span></div>
+    <div class="kpi"><span class="lbl">Phí ship</span><span class="val sm-val">${fmtMoney(st.ship)}</span><span class="sub">Phần shop trả, gồm phí hoàn</span></div>
+    <div class="kpi"><span class="lbl">Giá vốn sản phẩm</span><span class="val sm-val">${fmtMoney(st.cost)}</span><span class="sub">${st.noCost ? `<span class="warn-txt">${st.noCost} đơn chưa có giá vốn</span>` : 'Theo giá vốn trong Sản phẩm'}</span></div>
+    <div class="kpi"><span class="lbl">Quảng cáo</span><span class="val sm-val">${fmtMoney(st.ads)}</span><span class="sub"><a href="#ads">Nhập chi phí ads</a>${st.ads && st.list.length ? ' · ' + fmtMoney(st.ads / st.list.length) + '/đơn' : ''}</span></div>
+    <div class="kpi hl"><span class="lbl">Lợi nhuận</span><span class="val sm-val ${st.profit < 0 ? 'bad-txt' : ''}">${fmtMoney(st.profit)}</span><span class="sub">Biên ${pct(st.profit, st.revenue)} doanh thu</span></div>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><span class="lbl">Đơn đã gửi</span><span class="val">${fmtNum(st.list.length)}</span><span class="sub">${fmtNum(S.orders.filter(o=>o.status==='draft').length)} đơn nháp chưa đẩy</span></div>
+    <div class="kpi"><span class="lbl">Tỉ lệ giao thành công</span><span class="val">${rate == null ? '—' : pct(st.ok, st.ok + st.ret.length)}</span><span class="sub">${st.ok} thành công · ${st.ret.length} hoàn</span></div>
+    <div class="kpi"><span class="lbl">COD chờ đối soát</span><span class="val">${fmtMoney(sum(codWait, o => o.amount))}</span><span class="sub">${codWait.length} đơn đã giao, tất cả các ngày</span></div>
     <div class="kpi ${issues.length?'alert':''}"><span class="lbl">Đơn cần xử lý</span><span class="val">${issues.length}</span><span class="sub">Hoãn giao, không giao được, thất lạc…</span></div>
   </div>
   <div class="grid2">
-    <div class="panel"><div class="panel-h"><h3>Số đơn tạo mỗi ngày</h3><span class="muted sm">14 ngày gần nhất</span></div><div class="panel-b">${barChart(days)}</div></div>
+    <div class="panel"><div class="panel-h"><h3>Số đơn mỗi ngày</h3><span class="muted sm">${c0 === a ? 'Trong kỳ' : '14 ngày gần nhất'} · rê chuột xem doanh thu</span></div><div class="panel-b">${barChart(days)}</div></div>
+    <div class="panel"><div class="panel-h"><h3>Lợi nhuận ${perName}</h3></div><div class="tbl-wrap"><table class="tbl pl"><tbody>
+      ${plRow('', 'Doanh thu', st.revenue, 'Tổng giá đơn hàng của đơn đang giao và đã giao')}
+      ${plRow('−', 'Phí ship', st.ship, 'Đơn người gửi trả phí, và phí ship + phí hoàn của đơn hoàn')}
+      ${plRow('−', 'Giá vốn sản phẩm', st.cost, 'Đơn hoàn không tính vì hàng quay về kho')}
+      ${plRow('−', 'Quảng cáo', st.ads, 'Theo số nhập tay ở tab Quảng cáo')}
+      <tr class="total"><td class="op">=</td><td>Lợi nhuận</td><td class="num ${st.profit < 0 ? 'bad-txt' : ''}">${fmtMoney(st.profit)}</td></tr>
+    </tbody></table></div></div>
+  </div>
+  <div class="grid2" style="margin-top:16px">
     <div class="panel"><div class="panel-h"><h3>Đơn theo trạng thái</h3><span class="muted sm">Tất cả đơn · bấm để lọc</span></div><div class="panel-b"><div class="glist">
       ${gCount.map(x => `<button class="grow" data-act="goto-group" data-group="${x.g.id}"><span class="gname"><span class="dot tone-${x.g.tone}"></span>${x.g.name}</span><span class="gtrack"><span class="gfill tone-${x.g.tone}" style="display:block;width:${(x.n/gMax*100).toFixed(1)}%"></span></span><span class="num strong">${x.n}</span></button>`).join('') || '<div class="empty">Chưa có đơn</div>'}
     </div></div></div>
-  </div>
-  <div class="panel" style="margin-top:16px"><div class="panel-h"><h3>Sản phẩm bán chạy</h3><span class="muted sm">30 ngày, không tính đơn huỷ</span></div>
+    <div class="panel"><div class="panel-h"><h3>Sản phẩm bán chạy</h3><span class="muted sm">${PERIODS.find(x => x[0] === per)[1]}, không tính đơn huỷ</span></div>
     <div class="tbl-wrap"><table class="tbl"><thead><tr><th>SKU</th><th>Sản phẩm</th><th class="num">Số lượng</th><th class="num">Số đơn</th></tr></thead><tbody>
     ${top.map(p => `<tr><td class="mono strong">${esc(p.sku)}</td><td>${esc(p.name)}</td><td class="num">${fmtNum(p.qty)}</td><td class="num">${fmtNum(p.n)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Chưa có dữ liệu</td></tr>'}
-    </tbody></table></div></div>`;
+    </tbody></table></div></div>
+  </div>`;
 }
 function niceMax(v){ if (v <= 4) return 4; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1,2,2.5,5,10]) if (m*p >= v) return m*p; return 10*p; }
 function barChart(days){
@@ -807,10 +859,10 @@ function barChart(days){
   const nt = max % 4 === 0 ? 4 : 5; const ticks = Array.from({length:nt+1}, (_, i) => max/nt*i);
   const y = v => T + ph - v / max * ph;
   const bar = (x, yy, w, h) => { const r = Math.min(4, w/2, h); if (h <= 0) return ''; return `M${x},${yy+h}V${yy+r}Q${x},${yy} ${x+r},${yy}H${x+w-r}Q${x+w},${yy} ${x+w},${yy+r}V${yy+h}Z`; };
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Số đơn tạo mỗi ngày trong 14 ngày">
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Số đơn tạo mỗi ngày">
     ${ticks.map(v => `<line class="grid" x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L-8}" y="${y(v)+4}" text-anchor="end">${Number.isInteger(v)?v:v.toFixed(1)}</text>`).join('')}
     ${days.map((d, i) => { const x = L + step*i + (step-bw)/2; const h = d.n / max * ph;
-      return `<g><path class="bar" d="${bar(x, y(d.n), bw, h)}"/><rect class="hit" x="${L+step*i}" y="${T}" width="${step}" height="${ph}" data-tip="${fmtDay(d.d)}: ${d.n} đơn · COD ${fmtMoney(d.cod)}"/>${i % 2 === (days.length-1) % 2 ? `<text x="${x+bw/2}" y="${H-8}" text-anchor="middle">${fmtDay(d.d)}</text>` : ''}</g>`; }).join('')}
+      return `<g><path class="bar" d="${bar(x, y(d.n), bw, h)}"/><rect class="hit" x="${L+step*i}" y="${T}" width="${step}" height="${ph}" data-tip="${fmtDay(d.d)}: ${d.n} đơn · doanh thu ${fmtMoney(d.cod)}"/>${i % 2 === (days.length-1) % 2 ? `<text x="${x+bw/2}" y="${H-8}" text-anchor="middle">${fmtDay(d.d)}</text>` : ''}</g>`; }).join('')}
   </svg>`;
 }
 
@@ -1159,6 +1211,54 @@ function vProducts(){
   <p class="muted sm" style="margin-top:10px">Giá vốn chỉ dùng để tính lãi gộp trong trang Đối soát COD, không gửi sang SuperShip.</p>`;
 }
 
+// ---------- Trang: Quảng cáo (nhập tay chi phí mỗi ngày) ----------
+const AD_CHANNELS = ['Facebook','TikTok','Shopee','Google'];
+function vAds(){
+  const today = dayKey(Date.now());
+  if (!UI.adDate) UI.adDate = today;
+  if (!UI.adMonth) UI.adMonth = UI.adDate.slice(0, 7);
+  const chs = S.adChannels; const cur = S.ads.filter(x => x.date === UI.adDate);
+  const [y, m] = UI.adMonth.split('-').map(Number);
+  const first = +new Date(y, m - 1, 1); const last = Math.min(+new Date(y, m, 1), +new Date(new Date().setHours(0,0,0,0)) + DAY);
+  const rows = [];
+  for (let t = first; t < last; t += DAY){ const k = dayKey(t); const day = S.ads.filter(x => x.date === k); rows.push({k, t, st:statsFor(t, t + DAY), by:chs.map(c => sum(day.filter(x => x.channel === c), x => x.amount)), note:S.adNotes[k] || ''}); }
+  rows.reverse();
+  const tot = statsFor(first, Math.max(first, last));
+  const perOrder = st => st.ads && st.list.length ? fmtMoney(st.ads / st.list.length) : '—';
+  const roas = st => st.ads ? (st.revenue / st.ads).toFixed(1).replace('.', ',') + 'x' : '—';
+  const [dy, dm, dd] = UI.adDate.split('-');
+  return `<div class="page-head"><div><h1>Quảng cáo</h1><p>Nhập tay chi phí quảng cáo mỗi ngày. Số này được trừ vào lợi nhuận ở trang Tổng quan.</p></div></div>
+  <div class="panel"><div class="panel-h"><h3>Chi phí ngày ${dd}/${dm}/${dy}</h3><span class="muted sm">${cur.length ? 'Đã nhập · sửa số rồi bấm Lưu' : 'Chưa nhập'}</span></div><div class="panel-b stack">
+    <div class="grid3">
+      <div class="field"><label for="ad-date">Ngày</label><input type="date" id="ad-date" value="${UI.adDate}" max="${today}"></div>
+      ${chs.map((c, i) => `<div class="field"><label for="ad-c${i}">${esc(c)} (₫)</label><input type="number" id="ad-c${i}" class="num" min="0" step="1000" data-ad-ch="${esc(c)}" value="${(cur.find(x => x.channel === c) || {}).amount ?? ''}" placeholder="0"></div>`).join('')}
+    </div>
+    <div class="field"><label for="ad-note">Ghi chú</label><input type="text" id="ad-note" value="${esc(S.adNotes[UI.adDate] || '')}" placeholder="Vd: chạy thử mẫu quảng cáo mới"></div>
+    <div class="row between wrap">
+      <div class="ch-list"><span class="muted sm">Kênh:</span>${chs.map(c => `<span class="tag">${esc(c)} <button class="btn sm ghost" style="height:auto;padding:0 2px" data-act="ad-delch" data-ch="${esc(c)}" aria-label="Bỏ kênh ${esc(c)}">×</button></span>`).join('')}
+        <input type="text" id="ad-newch" placeholder="Thêm kênh, vd: Zalo" style="width:150px;height:30px" aria-label="Tên kênh mới"><button class="btn sm" data-act="ad-addch">+ Thêm</button></div>
+      <button class="btn primary" data-act="ad-save">Lưu chi phí ngày ${dd}/${dm}</button>
+    </div>
+  </div></div>
+  <div class="kpis" style="margin-top:16px">
+    <div class="kpi"><span class="lbl">Tổng ads tháng ${m}/${y}</span><span class="val sm-val">${fmtMoney(tot.ads)}</span><span class="sub">${rows.filter(r => sum(r.by, x => x)).length} ngày có chi</span></div>
+    <div class="kpi"><span class="lbl">Doanh thu tháng</span><span class="val sm-val">${fmtMoney(tot.revenue)}</span><span class="sub">${tot.list.length} đơn</span></div>
+    <div class="kpi"><span class="lbl">Chi phí ads / đơn</span><span class="val sm-val">${perOrder(tot)}</span><span class="sub">Ads ÷ số đơn đã gửi</span></div>
+    <div class="kpi"><span class="lbl">ROAS</span><span class="val sm-val">${roas(tot)}</span><span class="sub">Doanh thu ÷ chi phí ads</span></div>
+    <div class="kpi hl"><span class="lbl">Lợi nhuận tháng</span><span class="val sm-val ${tot.profit < 0 ? 'bad-txt' : ''}">${fmtMoney(tot.profit)}</span><span class="sub">Sau ship, giá vốn, ads</span></div>
+  </div>
+  <div class="panel"><div class="panel-h"><h3>Theo ngày</h3><input type="month" id="ad-month" value="${UI.adMonth}" max="${today.slice(0, 7)}" aria-label="Chọn tháng" style="height:34px;width:auto"></div>
+    <div class="tbl-wrap"><table class="tbl compact"><thead><tr><th>Ngày</th>${chs.map(c => `<th class="num">${esc(c)}</th>`).join('')}<th class="num">Tổng ads</th><th class="num">Số đơn</th><th class="num">Doanh thu</th><th class="num">Ads/đơn</th><th class="num">ROAS</th><th class="num">Lợi nhuận</th><th>Ghi chú</th></tr></thead><tbody>
+    ${rows.map(r => `<tr class="clickable ${r.k === UI.adDate ? 'on' : ''}" data-act="ad-pick" data-date="${r.k}"><td class="mono">${fmtDay(new Date(r.t))}</td>${r.by.map(v => `<td class="num">${v ? fmtNum(v) : '<span class="muted">—</span>'}</td>`).join('')}<td class="num strong">${r.st.ads ? fmtNum(r.st.ads) : '<span class="muted">—</span>'}</td><td class="num">${r.st.list.length}</td><td class="num">${fmtNum(r.st.revenue)}</td><td class="num">${perOrder(r.st)}</td><td class="num">${roas(r.st)}</td><td class="num ${r.st.profit < 0 ? 'bad-txt' : ''}">${fmtNum(r.st.profit)}</td><td class="sm muted">${esc(r.note)}</td></tr>`).join('') || `<tr><td colspan="${chs.length + 8}" class="empty">Chưa có ngày nào trong tháng này.</td></tr>`}
+    </tbody>${rows.length ? `<tfoot><tr><td>Cả tháng</td>${chs.map((c, i) => `<td class="num">${fmtNum(sum(rows, r => r.by[i]))}</td>`).join('')}<td class="num">${fmtNum(tot.ads)}</td><td class="num">${tot.list.length}</td><td class="num">${fmtNum(tot.revenue)}</td><td class="num">${perOrder(tot)}</td><td class="num">${roas(tot)}</td><td class="num ${tot.profit < 0 ? 'bad-txt' : ''}">${fmtNum(tot.profit)}</td><td></td></tr></tfoot>` : ''}</table></div></div>
+  <p class="muted sm" style="margin-top:10px">Bấm vào một ngày trong bảng để sửa chi phí ngày đó. Số tiền trong bảng tính bằng đồng (₫).</p>`;
+}
+function afterAds(){
+  $('#ad-date').onchange = e => { if (e.target.value){ UI.adDate = e.target.value; UI.adMonth = UI.adDate.slice(0, 7); render(); } };
+  $('#ad-month').onchange = e => { if (e.target.value){ UI.adMonth = e.target.value; render(); } };
+  $('#ad-newch').onkeydown = e => { if (e.key === 'Enter') H['ad-addch'](); };
+}
+
 // ---------- Trang: Đối soát COD ----------
 function deliveredAt(o){ const j = [...(o.journeys||[])].reverse().find(x => /Đã Giao/i.test(x.status)); return j ? j.time : o.updatedAt; }
 function vCod(){
@@ -1409,6 +1509,21 @@ const H = {
   'form-push': () => submitForm(true),
   'form-reset': () => { UI.form = blankForm(); UI.editId = null; render(); },
   'cust-filter': a => { UI.custF = a.dataset.f; render(); },
+  'period': a => { UI.period = a.dataset.p; try { localStorage.setItem(KEY + '-period', UI.period); } catch(e) {} render(); },
+  'ad-pick': a => { UI.adDate = a.dataset.date; render(); window.scrollTo(0, 0); },
+  'ad-save': () => {
+    const d = $('#ad-date').value; if (!d) return toast('Chọn ngày trước.', 'warn');
+    S.ads = S.ads.filter(x => x.date !== d);
+    $$('[data-ad-ch]').forEach(inp => { const v = Math.max(0, Math.round(+inp.value || 0)); if (v) S.ads.push({date:d, channel:inp.dataset.adCh, amount:v}); });
+    const note = $('#ad-note').value.trim(); if (note) S.adNotes[d] = note; else delete S.adNotes[d];
+    S.ads.sort((a, b) => a.date.localeCompare(b.date)); save();
+    toast(`Đã lưu chi phí quảng cáo ngày ${d.split('-').reverse().join('/')}: ${fmtMoney(sum(S.ads.filter(x => x.date === d), x => x.amount))}.`, 'ok'); render();
+  },
+  'ad-addch': () => { const inp = $('#ad-newch'); const v = inp.value.trim(); if (!v) return inp.focus();
+    if (S.adChannels.some(c => c.toLowerCase() === v.toLowerCase())) return toast('Kênh này đã có.', 'warn');
+    S.adChannels.push(v); save(); render(); },
+  'ad-delch': a => { const c = a.dataset.ch; const used = S.ads.filter(x => x.channel === c).length;
+    confirmBox('Bỏ kênh ' + c + '?', used ? `Kênh có ${used} ngày đã nhập. Số tiền cũ vẫn được tính vào tổng ads, chỉ ẩn cột này đi.` : 'Kênh chưa có số liệu nào.', 'Bỏ kênh', () => { S.adChannels = S.adChannels.filter(x => x !== c); save(); render(); }); },
   'cust-tag': a => { const m = custMeta(a.dataset.phone); const t = a.dataset.tag; m.tags = m.tags.includes(t) ? m.tags.filter(x => x !== t) : [...m.tags, t]; save(); render(); },
   'cust-new-order': a => { const c = customerMap().get(a.dataset.phone); UI.form = blankForm(); UI.form.receiver = {...c.receiver}; UI.editId = null; closeDrawer(); go('new-order'); },
   'prod-add': () => { S.products.push({sku:'SKU' + (S.products.length + 1), name:'Sản phẩm mới', cost:0, weight:500}); save(); render(); const ins = $$('[data-f="sku"]'); ins[ins.length-1].select(); },
