@@ -1,0 +1,7 @@
+{
+  "name": "crm-do-tet",
+  "private": true,
+  "description": "CRM Đơn Hàng (SuperShip) – lưu dữ liệu vào SQLite",
+  "engines": { "node": ">=22.13" },
+  "scripts": { "start": "node server.js" }
+}

@@ -238,7 +238,7 @@ h2.mono{font-size:18px}
 'use strict';
 /* ============================================================
    CRM Đơn Hàng – kết nối SuperShip API (HTML/CSS/JS thuần)
-   Dữ liệu lưu trong localStorage của trình duyệt.
+   Dữ liệu lưu trong DB SQLite qua server.js (API /api/state).
    ============================================================ */
 
 // ---------- Hằng số SuperShip ----------
@@ -297,15 +297,52 @@ function defaults(){
       pickup:{code:'',name:'',contact:'',phone:'',address:'',province:'',district:'',commune:''} },
     products:[], orders:[], customers:{}, areas:{province:null, district:{}, commune:{}} };
 }
-function load(){
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) { const d = JSON.parse(raw); S = Object.assign(defaults(), d); S.settings = Object.assign(defaults().settings, d.settings||{}); S.settings.pickup = Object.assign(defaults().settings.pickup, (d.settings||{}).pickup||{}); return; }
-  } catch(e) {}
-  S = defaults(); seedSample();
+function setState(d){ S = Object.assign(defaults(), d); S.settings = Object.assign(defaults().settings, d.settings||{}); S.settings.pickup = Object.assign(defaults().settings.pickup, (d.settings||{}).pickup||{}); }
+async function load(){
+  const r = await fetch('api/state', {cache:'no-store'});
+  if (!r.ok) throw new Error('Server trả lỗi ' + r.status);
+  const {state} = await r.json();
+  if (state) { setState(state); markSaved(); return; }
+  // DB trống: chuyển dữ liệu cũ từ localStorage lên (nếu có), không thì tạo dữ liệu mẫu
+  let old = null; try { old = JSON.parse(localStorage.getItem(KEY)); } catch(e) {}
+  if (old && Array.isArray(old.orders)) { setState(old); UI.migrated = old.orders.length; }
+  else { S = defaults(); seedSample(); }
+  await flush(true);
 }
-let saveT;
-function save(){ clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e) {} }, 120); }
+
+// ---------- Lưu vào DB: chỉ gửi phần thay đổi so với lần lưu trước ----------
+let saveT, saving = null, saved = {meta:'', products:'', orders:new Map(), customers:new Map()}, replaceNext = false;
+const metaOf = () => { const m = Object.assign({}, S); delete m.products; delete m.orders; delete m.customers; return m; };
+function snapshot(){
+  return { meta:JSON.stringify(metaOf()), products:JSON.stringify(S.products),
+    orders:new Map(S.orders.map(o => [o.id, JSON.stringify(o)])), customers:new Map(Object.entries(S.customers).map(([k, v]) => [k, JSON.stringify(v)])) };
+}
+function markSaved(){ saved = snapshot(); }
+function diff(cur){
+  const ch = {}; let n = 0; let base = saved;
+  if (replaceNext) { ch.replace = true; base = {meta:'', products:'', orders:new Map(), customers:new Map()}; }
+  if (cur.meta !== base.meta) { ch.meta = JSON.parse(cur.meta); n++; }
+  if (cur.products !== base.products) { ch.products = JSON.parse(cur.products); n++; }
+  for (const [id, j] of cur.orders) if (base.orders.get(id) !== j) { (ch.orders = ch.orders || []).push(JSON.parse(j)); n++; }
+  for (const id of base.orders.keys()) if (!cur.orders.has(id)) { (ch.deleteOrders = ch.deleteOrders || []).push(id); n++; }
+  for (const [k, j] of cur.customers) if (base.customers.get(k) !== j) { (ch.customers = ch.customers || {})[k] = JSON.parse(j); n++; }
+  for (const k of base.customers.keys()) if (!cur.customers.has(k)) { (ch.deleteCustomers = ch.deleteCustomers || []).push(k); n++; }
+  return n || ch.replace ? ch : null;
+}
+async function flush(throwErr){
+  clearTimeout(saveT);
+  if (saving) { await saving.catch(() => {}); }
+  const cur = snapshot(); const ch = diff(cur); if (!ch) return;
+  saving = fetch('api/state', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(ch)})
+    .then(async r => { if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'HTTP ' + r.status); saved = cur; replaceNext = false; UI.saveErr = false; });
+  try { await saving; }
+  catch(e) { if (throwErr) throw e; if (!UI.saveErr) toast('Chưa lưu được vào DB: ' + e.message + '. Sẽ thử lại.', 'bad', 6000); UI.saveErr = true; saveT = setTimeout(flush, 5000); }
+  finally { saving = null; }
+}
+function save(){ clearTimeout(saveT); saveT = setTimeout(flush, 300); }
+// Ghi đè toàn bộ dữ liệu trong DB (khôi phục, xoá hết)
+function saveReplace(){ replaceNext = true; save(); }
+window.addEventListener('beforeunload', e => { if (diff(snapshot()) || saving) { flush(); e.preventDefault(); e.returnValue = ''; } });
 
 function nextSoc(date){
   S.seq = (S.seq||0) + 1; const d = new Date(date);
@@ -1093,7 +1130,7 @@ function vConfig(){
     </div></div>
 
     <div class="panel"><div class="panel-h"><h3>Dữ liệu</h3><span class="muted sm">${S.orders.length} đơn · ${S.products.length} sản phẩm · ${customerMap().size} khách</span></div><div class="panel-b stack">
-      <p class="muted">Dữ liệu chỉ nằm trong trình duyệt này. Xoá lịch sử duyệt web hoặc đổi máy sẽ mất, nên hãy sao lưu thường xuyên.</p>
+      <p class="muted">Dữ liệu được lưu trong DB trên server (file data/crm.db). Vẫn nên sao lưu định kỳ.</p>
       <div class="row wrap">
         <button class="btn" data-act="cfg-export">Sao lưu dữ liệu</button>
         <label class="btn" for="cfg-import-file">Khôi phục từ file sao lưu</label><input type="file" id="cfg-import-file" accept=".json,application/json" hidden>
@@ -1116,7 +1153,7 @@ function afterConfig(){
   $$('[data-pk]').forEach(el => el.addEventListener('change', e => { S.settings.pickup[e.target.dataset.pk] = e.target.value.trim(); save(); }));
   $('#cfg-import-file').onchange = e => { const file = e.target.files[0]; if (!file) return; const rd = new FileReader(); rd.onload = () => {
     try { const d = JSON.parse(rd.result); if (!d || !Array.isArray(d.orders)) throw new Error('File không đúng định dạng sao lưu.');
-      confirmBox('Khôi phục dữ liệu?', `File có ${d.orders.length} đơn. Dữ liệu hiện tại sẽ bị thay thế.`, 'Khôi phục', () => { const keepTok = S.settings.token; S = Object.assign(defaults(), d); S.settings = Object.assign(defaults().settings, d.settings||{}); if (!S.settings.token) S.settings.token = keepTok; save(); toast('Đã khôi phục dữ liệu.', 'ok'); render(); }, true);
+      confirmBox('Khôi phục dữ liệu?', `File có ${d.orders.length} đơn. Dữ liệu hiện tại sẽ bị thay thế.`, 'Khôi phục', () => { const keepTok = S.settings.token; S = Object.assign(defaults(), d); S.settings = Object.assign(defaults().settings, d.settings||{}); if (!S.settings.token) S.settings.token = keepTok; saveReplace(); toast('Đã khôi phục dữ liệu.', 'ok'); render(); }, true);
     } catch(err) { toast(err.message, 'bad'); } }; rd.readAsText(file); e.target.value = ''; };
 }
 function renderWarehouses(){
@@ -1237,7 +1274,7 @@ const H = {
   'cfg-wh-pick': a => { const w = UI.warehouses.find(x => x.code === a.dataset.code); const p = S.settings.pickup; p.code = w.code; p.name = w.name; p.address = w.address || p.address; save(); toast('Đã chọn ' + w.name + '. Kiểm tra lại tỉnh, quận, phường của kho bên dưới.', 'ok', 5000); render(); },
   'cfg-export': () => exportData(),
   'cfg-clear-sample': () => confirmBox('Xoá dữ liệu mẫu?', 'Xoá toàn bộ đơn và khách mẫu, tắt chế độ demo. Danh sách sản phẩm mẫu được giữ lại để bạn sửa giá cho đúng.', 'Xoá dữ liệu mẫu', () => { S.orders = []; S.customers = {}; S.sample = false; S.seq = 0; S.settings.demo = false; S.settings.pickup = defaults().settings.pickup; save(); toast('Đã xoá dữ liệu mẫu. Nhập token và kho lấy hàng để bắt đầu.', 'ok', 6000); render(); }),
-  'cfg-clear-all': () => confirmBox('Xoá toàn bộ dữ liệu?', 'Tất cả đơn, khách, sản phẩm và cài đặt trên trình duyệt này sẽ bị xoá. Đơn trên SuperShip không bị ảnh hưởng.', 'Xoá hết', () => { S = defaults(); S.settings.demo = false; save(); render(); }, true),
+  'cfg-clear-all': () => confirmBox('Xoá toàn bộ dữ liệu?', 'Tất cả đơn, khách, sản phẩm và cài đặt trong DB sẽ bị xoá. Đơn trên SuperShip không bị ảnh hưởng.', 'Xoá hết', () => { S = defaults(); S.settings.demo = false; saveReplace(); render(); }, true),
 };
 document.addEventListener('click', e => {
   if (e.target.closest('[data-stop]') && !e.target.closest('[data-act]:not(tr)')) return;
@@ -1259,11 +1296,16 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape'){ if ($('#mod
 // tooltip biểu đồ
 const tip = $('#tip');
 document.addEventListener('mousemove', e => { const t = e.target.closest && e.target.closest('[data-tip]'); if (!t){ tip.hidden = true; return; } tip.textContent = t.dataset.tip; tip.hidden = false; const w = tip.offsetWidth; tip.style.left = Math.min(window.innerWidth - w - 8, e.clientX + 12) + 'px'; tip.style.top = (e.clientY - 34) + 'px'; });
-window.addEventListener('hashchange', () => { closeModal(); render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => { if (!S) return; closeModal(); render(); window.scrollTo(0, 0); });
 
 // tự cập nhật trạng thái
-setInterval(() => { const m = +S.settings.autoSync; if (!m || UI.busy) return; if (Date.now() - UI.lastAuto < m*60000) return; UI.lastAuto = Date.now(); syncMany(activeOrders(), true); }, 30000);
+setInterval(() => { if (!S) return; const m = +S.settings.autoSync; if (!m || UI.busy) return; if (Date.now() - UI.lastAuto < m*60000) return; UI.lastAuto = Date.now(); syncMany(activeOrders(), true); }, 30000);
 
-load(); render();
+load().then(() => {
+  render();
+  if (UI.migrated) toast(`Đã chuyển ${UI.migrated} đơn từ trình duyệt vào DB.`, 'ok', 6000);
+}).catch(e => {
+  $('#main').innerHTML = `<div class="panel"><div class="panel-b stack"><h3>Không kết nối được server</h3><p class="muted">${esc(e.message)}. Hãy chạy <span class="mono">node server.js</span> rồi mở trang qua địa chỉ server (vd. http://localhost:3005), không mở file HTML trực tiếp.</p></div></div>`;
+});
 </script>
 </body></html>
