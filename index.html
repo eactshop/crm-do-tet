@@ -86,6 +86,9 @@ a{color:var(--accent)}
 .tbl tfoot td{font-weight:600;border-top:1px solid var(--line-2);padding:10px 12px;background:var(--surface-2)}
 .pl td{padding:9px 12px} .pl .op{color:var(--muted);width:18px;font-family:'JetBrains Mono',monospace} .pl tr.total td{font-weight:700;border-top:1px solid var(--line-2)}
 .ch-list{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+details.panel>summary{cursor:pointer;list-style:none} details.panel>summary::-webkit-details-marker{display:none}
+details.panel:not([open])>summary{border-bottom:0}
+.steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:8px} .steps li{line-height:1.5}
 
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 14px;border-radius:7px;border:1px solid var(--line-2);background:var(--surface);color:var(--ink);font:inherit;font-weight:500;cursor:pointer;white-space:nowrap;text-decoration:none}
 .btn:hover{background:var(--surface-2)}
@@ -298,7 +301,7 @@ const UI = { group:'all', q:'', range:'30', sel:new Set(), form:null, editId:nul
 
 function defaults(){
   return { version:1, sample:false, seq:0,
-    settings:{ demo:true, apiBase:'https://api.mysupership.vn', token:'', payer:'2', config:'1', printSize:'A5', autoSync:0, prefix:'DH',
+    settings:{ demo:true, apiBase:'https://api.mysupership.vn', token:'', payer:'2', config:'1', printSize:'A5', autoSync:0, prefix:'DH', fbToken:'', fbAccounts:'', fbVersion:'v25.0', fbAuto:true, fbLast:'',
       pickup:{code:'',name:'',contact:'',phone:'',address:'',province:'',district:'',commune:''} },
     products:[], orders:[], customers:{}, areas:{province:null, district:{}, commune:{}},
     ads:[], adNotes:{}, adChannels:[...AD_CHANNELS] };
@@ -1227,11 +1230,12 @@ function vAds(){
   const perOrder = st => st.ads && st.list.length ? fmtMoney(st.ads / st.list.length) : '—';
   const roas = st => st.ads ? (st.revenue / st.ads).toFixed(1).replace('.', ',') + 'x' : '—';
   const [dy, dm, dd] = UI.adDate.split('-');
-  return `<div class="page-head"><div><h1>Quảng cáo</h1><p>Nhập tay chi phí quảng cáo mỗi ngày. Số này được trừ vào lợi nhuận ở trang Tổng quan.</p></div></div>
+  return `<div class="page-head"><div><h1>Quảng cáo</h1><p>Nhập tay chi phí quảng cáo mỗi ngày, hoặc kết nối Facebook để tự lấy. Số này được trừ vào lợi nhuận ở trang Tổng quan.</p></div></div>
+  ${fbPanel()}
   <div class="panel"><div class="panel-h"><h3>Chi phí ngày ${dd}/${dm}/${dy}</h3><span class="muted sm">${cur.length ? 'Đã nhập · sửa số rồi bấm Lưu' : 'Chưa nhập'}</span></div><div class="panel-b stack">
     <div class="grid3">
       <div class="field"><label for="ad-date">Ngày</label><input type="date" id="ad-date" value="${UI.adDate}" max="${today}"></div>
-      ${chs.map((c, i) => `<div class="field"><label for="ad-c${i}">${esc(c)} (₫)</label><input type="number" id="ad-c${i}" class="num" min="0" step="1000" data-ad-ch="${esc(c)}" value="${(cur.find(x => x.channel === c) || {}).amount ?? ''}" placeholder="0"></div>`).join('')}
+      ${chs.map((c, i) => { const auto = c === 'Facebook' && fbReady(); return `<div class="field"><label for="ad-c${i}">${esc(c)} (₫)${auto ? ' <span class="muted sm">· tự động</span>' : ''}</label><input type="number" id="ad-c${i}" class="num" min="0" step="1000" data-ad-ch="${esc(c)}" value="${(cur.find(x => x.channel === c) || {}).amount ?? ''}" placeholder="0" ${auto ? 'readonly title="Lấy tự động từ Facebook Ads"' : ''}></div>`; }).join('')}
     </div>
     <div class="field"><label for="ad-note">Ghi chú</label><input type="text" id="ad-note" value="${esc(S.adNotes[UI.adDate] || '')}" placeholder="Vd: chạy thử mẫu quảng cáo mới"></div>
     <div class="row between wrap">
@@ -1253,7 +1257,76 @@ function vAds(){
     </tbody>${rows.length ? `<tfoot><tr><td>Cả tháng</td>${chs.map((c, i) => `<td class="num">${fmtNum(sum(rows, r => r.by[i]))}</td>`).join('')}<td class="num">${fmtNum(tot.ads)}</td><td class="num">${tot.list.length}</td><td class="num">${fmtNum(tot.revenue)}</td><td class="num">${perOrder(tot)}</td><td class="num">${roas(tot)}</td><td class="num ${tot.profit < 0 ? 'bad-txt' : ''}">${fmtNum(tot.profit)}</td><td></td></tr></tfoot>` : ''}</table></div></div>
   <p class="muted sm" style="margin-top:10px">Bấm vào một ngày trong bảng để sửa chi phí ngày đó. Số tiền trong bảng tính bằng đồng (₫).</p>`;
 }
+// ---------- Facebook Ads: tự lấy chi phí theo ngày (qua server, token lưu trong Cài đặt) ----------
+const fbReady = () => !!(S.settings.fbToken && S.settings.fbAccounts);
+async function fbSync(since, until, silent){
+  if (UI.fbBusy) return; UI.fbBusy = true; const btn = $('[data-act="fb-sync-month"]'); if (btn) btn.disabled = true;
+  try {
+    await flush(true);
+    const r = await serverApi('POST', 'api/fb/spend', {since, until});
+    UI.fbAccounts = r.accounts; UI.fbErr = '';
+    const bad = r.accounts.filter(a => a.error);
+    if (bad.length) throw new Error(bad.map(a => `act_${a.id}: ${a.error}`).join(' · '));
+    const ch = 'Facebook'; if (!S.adChannels.includes(ch)) S.adChannels.unshift(ch);
+    let total = 0;
+    for (let t = +new Date(since + 'T00:00:00'); dayKey(t) <= until; t += DAY){
+      const k = dayKey(t), v = r.days[k] || 0; total += v;
+      S.ads = S.ads.filter(x => !(x.date === k && x.channel === ch));
+      if (v) S.ads.push({date:k, channel:ch, amount:v, src:'fb'});
+    }
+    S.ads.sort((a, b) => a.date.localeCompare(b.date));
+    S.settings.fbLast = new Date().toISOString(); save();
+    if (!silent) toast(`Đã lấy chi phí Facebook ${since.split('-').reverse().join('/')} – ${until.split('-').reverse().join('/')}: ${fmtMoney(total)}.`, 'ok', 6000);
+  } catch(e) {
+    UI.fbErr = e.message; if (!silent) toast('Facebook: ' + e.message, 'bad', 9000);
+  } finally {
+    UI.fbBusy = false;
+    if (['ads', 'overview'].includes(currentView()) && !(document.activeElement && document.activeElement.closest('#main input'))) render();
+  }
+}
+// Tự lấy 7 ngày gần nhất, tối đa mỗi giờ một lần, khi CRM đang mở
+function fbAutoSync(){
+  if (!S || !fbReady() || !S.settings.fbAuto || UI.fbBusy) return;
+  if (S.settings.fbLast && Date.now() - new Date(S.settings.fbLast) < 3600e3) return;
+  fbSync(dayKey(Date.now() - 6*DAY), dayKey(Date.now()), true);
+}
+function fbHelp(){
+  openModal(`<div class="row between"><h3>Lấy token Facebook Ads (không hết hạn)</h3><button class="icon-btn" data-act="modal-close" aria-label="Đóng">×</button></div>
+    <p class="muted">Làm một lần, khoảng 10 phút. Cần quyền quản trị Business Manager (Trình quản lý kinh doanh) đang sở hữu tài khoản quảng cáo.</p>
+    <ol class="steps">
+      <li><strong>Tạo app:</strong> vào <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com/apps</a> → <em>Tạo ứng dụng</em> → chọn loại <em>Doanh nghiệp (Business)</em>, gắn với Business Manager của bạn. Trong app, thêm sản phẩm <em>Marketing API</em>.</li>
+      <li><strong>Tạo người dùng hệ thống:</strong> vào <a href="https://business.facebook.com/settings/system-users" target="_blank" rel="noopener">Cài đặt doanh nghiệp → Người dùng hệ thống</a> → <em>Thêm</em>, đặt tên vd “CRM”, vai trò <em>Quản trị viên</em>.</li>
+      <li><strong>Cấp tài khoản quảng cáo:</strong> chọn người dùng vừa tạo → <em>Chỉ định tài sản</em> → <em>Tài khoản quảng cáo</em> → tick các tài khoản cần lấy số, bật quyền <em>Xem hiệu quả</em> (hoặc Quản lý).</li>
+      <li><strong>Tạo token:</strong> vẫn ở người dùng đó → <em>Tạo mã mới</em> → chọn app ở bước 1 → thời hạn <em>Không bao giờ</em> → tick quyền <span class="mono">ads_read</span> → tạo và sao chép mã (chỉ hiện một lần).</li>
+      <li><strong>Lấy ID tài khoản quảng cáo:</strong> mở Trình quản lý quảng cáo, nhìn trên thanh địa chỉ có <span class="mono">act=123456789</span>, hoặc xem ở Cài đặt doanh nghiệp → Tài khoản quảng cáo. Nhiều tài khoản thì cách nhau bằng dấu phẩy.</li>
+      <li>Dán token và ID vào ô bên trên, bấm <em>Lấy chi phí tháng này</em> để kiểm tra.</li>
+    </ol>
+    <p class="note sm">Token này xem được số liệu quảng cáo, hãy giữ kín. CRM lưu token trong DB trên server, không gửi cho ai khác ngoài Facebook, và không kèm trong file sao lưu.</p>
+    <div class="row end"><button class="btn primary" data-act="modal-close">Đã hiểu</button></div>`);
+}
+function fbPanel(){
+  const st = S.settings; const ok = fbReady();
+  const accs = (UI.fbAccounts || []).map(a => a.error ? `<div class="bad-txt">act_${esc(a.id)}: ${esc(a.error)}</div>`
+    : `<div><span class="ok-txt">✓</span> ${esc(a.name || 'act_' + a.id)} <span class="mono muted">act_${esc(a.id)}</span>${a.currency && a.currency !== 'VND' ? ` <span class="warn-txt">· tiền tệ ${esc(a.currency)}, CRM đang cộng như VNĐ</span>` : ''}</div>`).join('');
+  const [y, m] = UI.adMonth.split('-');
+  return `<details class="panel" id="fb-box" style="margin-bottom:16px" ${ok && !UI.fbOpen ? '' : 'open'}><summary class="panel-h"><h3>Facebook Ads – tự lấy chi phí</h3>
+    <span class="sm ${UI.fbErr ? 'bad-txt' : ok ? 'ok-txt' : 'muted'}">${UI.fbBusy ? 'Đang lấy…' : UI.fbErr ? 'Lỗi – bấm để xem' : ok ? (st.fbLast ? 'Đã kết nối · cập nhật ' + ago(st.fbLast) : 'Đã nhập token') : 'Chưa kết nối · bấm để thiết lập'}</span></summary>
+    <div class="panel-b stack">
+      <div class="grid3">
+        <div class="field"><label for="fb-token">Access token</label><input type="password" id="fb-token" data-fb="fbToken" value="${esc(st.fbToken)}" placeholder="EAAG…" autocomplete="off"><span class="help"><a href="#ads" data-act="fb-help">Cách lấy token không hết hạn</a></span></div>
+        <div class="field"><label for="fb-acc">ID tài khoản quảng cáo</label><input type="text" id="fb-acc" class="mono" data-fb="fbAccounts" value="${esc(st.fbAccounts)}" placeholder="act_123456789, act_987…"><span class="help">Nhiều tài khoản thì cách nhau bằng dấu phẩy, chi phí được cộng gộp.</span></div>
+        <div class="field"><label for="fb-ver">Phiên bản API</label><input type="text" id="fb-ver" class="mono" data-fb="fbVersion" value="${esc(st.fbVersion)}"><span class="help">Để mặc định, chỉ đổi khi Facebook báo phiên bản hết hạn.</span></div>
+      </div>
+      <label class="switch"><input type="checkbox" id="fb-auto" ${st.fbAuto ? 'checked' : ''}> Tự lấy chi phí 7 ngày gần nhất mỗi giờ khi CRM đang mở</label>
+      <div class="row wrap"><button class="btn primary" data-act="fb-sync-month" ${ok && !UI.fbBusy ? '' : 'disabled'}>Lấy chi phí tháng ${m}/${y}</button><button class="btn ghost" data-act="fb-help">Hướng dẫn</button></div>
+      ${UI.fbErr ? `<div class="bad-txt sm">${esc(UI.fbErr)}</div>` : ''}${accs ? `<div class="sm stack" style="gap:4px">${accs}</div>` : ''}
+      <p class="muted sm" style="margin:0">Chi phí Facebook lấy từ API sẽ ghi đè cột Facebook của những ngày được lấy, theo múi giờ của tài khoản quảng cáo.</p>
+    </div></details>`;
+}
 function afterAds(){
+  $$('[data-fb]').forEach(el => el.addEventListener('change', e => { S.settings[e.target.dataset.fb] = e.target.value.trim(); UI.fbErr = ''; save(); render(); }));
+  $('#fb-auto').onchange = e => { S.settings.fbAuto = e.target.checked; save(); };
+  $('#fb-box').ontoggle = e => { UI.fbOpen = e.target.open; };
   $('#ad-date').onchange = e => { if (e.target.value){ UI.adDate = e.target.value; UI.adMonth = UI.adDate.slice(0, 7); render(); } };
   $('#ad-month').onchange = e => { if (e.target.value){ UI.adMonth = e.target.value; render(); } };
   $('#ad-newch').onkeydown = e => { if (e.key === 'Enter') H['ad-addch'](); };
@@ -1459,7 +1532,7 @@ async function hookInfo(register){
 
 // ---------- Sao lưu ----------
 function exportData(){
-  const data = JSON.stringify(Object.assign({}, S, {settings:Object.assign({}, S.settings, {token:''})}), null, 1);
+  const data = JSON.stringify(Object.assign({}, S, {settings:Object.assign({}, S.settings, {token:'', fbToken:''})}), null, 1);
   const name = `crm-don-hang-saoluu-${new Date().toISOString().slice(0,10)}.json`;
   if (!isEmbedded){ const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], {type:'application/json'})); a.download = name; document.body.append(a); a.click(); a.remove(); toast('Đã tải file sao lưu (không kèm token).', 'ok'); return; }
   openModal(`<div class="row between"><h3>Sao lưu dữ liệu</h3><button class="icon-btn" data-act="modal-close" aria-label="Đóng">×</button></div><p class="muted">Trong bản xem này không tải file được. Sao chép nội dung dưới đây và lưu thành file <span class="mono">${name}</span>. Token không được kèm theo.</p><textarea class="mono-box" readonly id="bk-text">${esc(data)}</textarea><div class="row end"><button class="btn primary" data-act="copy-el" data-el="#bk-text">Sao chép</button></div>`);
@@ -1510,6 +1583,9 @@ const H = {
   'form-reset': () => { UI.form = blankForm(); UI.editId = null; render(); },
   'cust-filter': a => { UI.custF = a.dataset.f; render(); },
   'period': a => { UI.period = a.dataset.p; try { localStorage.setItem(KEY + '-period', UI.period); } catch(e) {} render(); },
+  'fb-help': () => fbHelp(),
+  'fb-sync-month': () => { const [y, m] = UI.adMonth.split('-').map(Number); const today = dayKey(Date.now()); const end = dayKey(+new Date(y, m, 1) - DAY);
+    fbSync(`${y}-${pad(m)}-01`, end < today ? end : today); },
   'ad-pick': a => { UI.adDate = a.dataset.date; render(); window.scrollTo(0, 0); },
   'ad-save': () => {
     const d = $('#ad-date').value; if (!d) return toast('Chọn ngày trước.', 'warn');
@@ -1560,11 +1636,12 @@ window.addEventListener('hashchange', () => { if (!S) return; closeModal(); rend
 
 // tự cập nhật trạng thái
 setInterval(pollServer, 30000);
+setInterval(fbAutoSync, 5*60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) pollServer(); });
 setInterval(() => { if (!S) return; const m = +S.settings.autoSync; if (!m || UI.busy) return; if (Date.now() - UI.lastAuto < m*60000) return; UI.lastAuto = Date.now(); syncMany(activeOrders(), true); }, 30000);
 
 load().then(() => {
-  render();
+  render(); fbAutoSync();
   if (UI.migrated) toast(`Đã chuyển ${UI.migrated} đơn từ trình duyệt vào DB.`, 'ok', 6000);
 }).catch(e => {
   $('#main').innerHTML = `<div class="panel"><div class="panel-b stack"><h3>Không kết nối được server</h3><p class="muted">${esc(e.message)}. Hãy chạy <span class="mono">node server.js</span> rồi mở trang qua địa chỉ server (vd. http://localhost:3005), không mở file HTML trực tiếp.</p></div></div>`;

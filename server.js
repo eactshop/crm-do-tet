@@ -15,6 +15,7 @@ const PORT = +process.env.PORT || 3005;
 const HOST = process.env.HOST || '127.0.0.1';
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'data', 'crm.db');
 const AUTH = process.env.APP_AUTH || '';
+const FB_GRAPH = process.env.FB_GRAPH || 'https://graph.facebook.com';
 const MAX_BODY = 50 * 1024 * 1024;
 
 fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
@@ -146,7 +147,39 @@ function hookSecret(){
   if (!s){ s = require('node:crypto').randomBytes(16).toString('hex'); q.metaSet.run('hookSecret', JSON.stringify(s)); }
   return s;
 }
-const publicBase = req => (req.headers['x-forwarded-proto'] || 'http') + '://' + req.headers.host;
+// ---------- Facebook Marketing API: chi phí quảng cáo theo ngày ----------
+// Trả về { days: {'YYYY-MM-DD': số tiền}, accounts: [{id, name, currency, spend, error}] }, ngày theo múi giờ tài khoản quảng cáo
+async function fbSpend(since, until){
+  const st = (getMeta('state') || {}).settings || {};
+  if (!st.fbToken) throw new Error('Chưa nhập token Facebook.');
+  const ids = String(st.fbAccounts || '').split(/[\s,;]+/).map(x => x.replace(/^act_/, '')).filter(Boolean);
+  if (!ids.length) throw new Error('Chưa nhập ID tài khoản quảng cáo.');
+  const ver = String(st.fbVersion || 'v25.0').trim();
+  const days = {}, accounts = [];
+  for (const id of ids){
+    const acc = { id, spend: 0 };
+    try {
+      let next = `${FB_GRAPH}/${ver}/act_${id}/insights?` + new URLSearchParams({
+        level: 'account', fields: 'spend,account_name,account_currency', time_increment: '1', limit: '500',
+        time_range: JSON.stringify({ since, until }), access_token: st.fbToken });
+      while (next){
+        const res = await fetch(next, { signal: AbortSignal.timeout(30000) });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || d.error) throw new Error((d.error && d.error.message) || 'Facebook trả lỗi HTTP ' + res.status);
+        for (const r of d.data || []){
+          acc.name = r.account_name; acc.currency = r.account_currency;
+          const v = +r.spend || 0; acc.spend += v; days[r.date_start] = (days[r.date_start] || 0) + v;
+        }
+        next = d.paging && d.paging.next;
+      }
+    } catch (e) { acc.error = e.message; }
+    accounts.push(acc);
+  }
+  for (const k in days) days[k] = Math.round(days[k]);
+  return { days, accounts };
+}
+
+const publicBase = req =>(req.headers['x-forwarded-proto'] || 'http') + '://' + req.headers.host;
 
 function send(res, code, body, type = 'application/json; charset=utf-8'){
   res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' });
@@ -190,6 +223,11 @@ http.createServer(async (req, res) => {
       if (req.method === 'POST') await ssApi('POST', '/v1/partner/webhooks/create', { body: { url: hookUrl } });
       let current = null; try { current = await ssApi('GET', '/v1/partner/webhooks'); } catch (e) { current = { error: e.message }; }
       return send(res, 200, { url: hookUrl, current });
+    }
+    if (url.pathname === '/api/fb/spend' && req.method === 'POST'){
+      const { since, until } = await readBody(req); const re = /^\d{4}-\d{2}-\d{2}$/;
+      if (!re.test(since) || !re.test(until) || since > until) return send(res, 400, { error: 'Khoảng ngày không hợp lệ' });
+      return send(res, 200, await fbSpend(since, until));
     }
     if (url.pathname === '/api/state' && req.method === 'POST'){ applyChanges(await readBody(req)); return send(res, 200, { ok: true }); }
     if (url.pathname === '/' || url.pathname === '/index.html') return send(res, 200, fs.readFileSync(path.join(__dirname, 'index.html')), 'text/html; charset=utf-8');
