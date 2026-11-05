@@ -613,7 +613,8 @@ async function printOrders(list){
       ${S.settings.demo ? '<p class="note">Chế độ Demo: mã in là giả nên trang SuperShip sẽ không hiện vận đơn. Khi dùng token thật, nút bên dưới mở thẳng trang in.</p>' : '<p class="muted sm">Trang in mở ở tab mới của SuperShip. Mã in chỉ dùng được một thời gian ngắn.</p>'}
       <div class="row end"><button class="btn ghost" data-act="modal-close">Đóng</button><a class="btn primary" id="pr-go" target="_blank" rel="noopener" href="${esc(link(S.settings.printSize))}">Mở trang in</a></div>`, 'narrow');
     $('#pr-size').onchange = e => { S.settings.printSize = e.target.value; save(); $('#pr-go').href = link(e.target.value); };
-    list.forEach(o => { if (o.ssCode) { o.printedAt = new Date().toISOString(); } }); save();
+    list.forEach(o => { if (o.ssCode) { if (!o.printedAt) addLog(o, 'In vận đơn'); o.printedAt = new Date().toISOString(); } }); save();
+    if (currentView() === 'orders') renderOrdersBody();
   } catch(e) { closeModal(); toast(e.message, 'bad'); }
 }
 async function runMany(list, fn, label){
@@ -882,7 +883,8 @@ function vOrders(){
     <div class="row wrap"><button class="btn" data-act="pull-open">Kéo đơn từ SuperShip</button><button class="btn" data-act="import-open">Nhập từ Excel</button><button class="btn" data-act="sync-all">Cập nhật trạng thái</button><a class="btn primary" href="#new-order">Tạo đơn</a></div></div>
   <div class="panel">
     <div class="toolbar"><input type="search" id="o-q" placeholder="Tìm mã đơn, tên, SĐT, SKU…" value="${esc(UI.q)}" aria-label="Tìm đơn">
-      <select id="o-range" aria-label="Khoảng thời gian">${[['7','7 ngày'],['30','30 ngày'],['90','90 ngày'],['all','Tất cả']].map(([v,l]) => `<option value="${v}" ${UI.range===v?'selected':''}>${l}</option>`).join('')}</select></div>
+      <select id="o-range" aria-label="Khoảng thời gian">${[['7','7 ngày'],['30','30 ngày'],['90','90 ngày'],['all','Tất cả']].map(([v,l]) => `<option value="${v}" ${UI.range===v?'selected':''}>${l}</option>`).join('')}</select>
+      <select id="o-print" aria-label="Lọc theo in vận đơn">${[['all','In vận đơn: tất cả'],['no','Chưa in'],['yes','Đã in']].map(([v,l]) => `<option value="${v}" ${(UI.printF||'all')===v?'selected':''}>${l}</option>`).join('')}</select></div>
     <div class="toolbar" id="o-chips"></div>
     <div id="o-bulk"></div>
     <div class="tbl-wrap" id="o-table"></div>
@@ -891,9 +893,13 @@ function vOrders(){
 function afterOrders(){
   $('#o-q').oninput = e => { UI.q = e.target.value; renderOrdersBody(); };
   $('#o-range').onchange = e => { UI.range = e.target.value; renderOrdersBody(); };
+  $('#o-print').onchange = e => { UI.printF = e.target.value; UI.sel.clear(); renderOrdersBody(); };
   renderOrdersBody();
 }
-function filteredOrders(){ return S.orders.filter(o => inRange(o) && matchQ(o)); }
+// Chưa in: đơn đã đẩy lên SuperShip, chưa huỷ, chưa in vận đơn lần nào
+const printable = o => !!o.ssCode && o.status !== '0';
+function matchPrint(o){ const f = UI.printF || 'all'; if (f === 'all') return true; return f === 'yes' ? !!o.printedAt : printable(o) && !o.printedAt; }
+function filteredOrders(){ return S.orders.filter(o => inRange(o) && matchQ(o) && matchPrint(o)); }
 function renderOrdersBody(){
   const base = filteredOrders();
   const list = UI.group === 'all' ? base : base.filter(o => groupOf(o.status).id === UI.group);
@@ -906,6 +912,8 @@ function renderOrdersBody(){
     <button class="btn sm primary" data-act="bulk-push" ${sel.some(o=>o.status==='draft')?'':'disabled'}>Đẩy lên SuperShip</button>
     <button class="btn sm" data-act="bulk-sync">Cập nhật trạng thái</button>
     <button class="btn sm" data-act="bulk-print">In vận đơn</button>
+    <button class="btn sm ghost" data-act="bulk-printed" data-v="1" title="Dùng khi đã in trực tiếp trên trang SuperShip">Đánh dấu đã in</button>
+    <button class="btn sm ghost" data-act="bulk-printed" data-v="0">Đánh dấu chưa in</button>
     <button class="btn sm danger" data-act="bulk-cancel">Huỷ đơn</button>
     <button class="btn sm ghost" data-act="bulk-clear">Bỏ chọn</button></div>` : '';
   const all = list.length && list.every(o => UI.sel.has(o.id));
@@ -916,7 +924,7 @@ function renderOrdersBody(){
 function orderRow(o){
   return `<tr class="clickable" data-act="open-order" data-id="${o.id}">
     <td class="chk" data-stop><input type="checkbox" data-sel="${o.id}" ${UI.sel.has(o.id)?'checked':''} aria-label="Chọn đơn ${esc(o.soc)}"></td>
-    <td><div class="mono strong">${esc(o.soc)}</div><div class="mono muted sm">${o.ssCode ? esc(o.ssCode) : 'chưa đẩy'}</div></td>
+    <td><div class="mono strong">${esc(o.soc)}</div><div class="mono muted sm">${o.ssCode ? esc(o.ssCode) : 'chưa đẩy'}${o.printedAt ? ' · <span class="ok-txt" title="In lúc ' + fmtDate(o.printedAt) + '">đã in</span>' : ''}</div></td>
     <td class="nowrap">${fmtDate(o.createdAt)}</td>
     <td><div>${esc(o.receiver.name)}</div><div class="muted sm mono">${esc(o.receiver.phone)}</div></td>
     <td class="hide-sm">${esc(shortProv(o.receiver.province))}</td>
@@ -932,7 +940,7 @@ function orderDetail(o){
       <div class="muted mono sm">${o.ssCode ? 'SuperShip ' + esc(o.ssCode) + (o.shortcode ? ' · mã vạch ' + esc(o.shortcode) : '') + (o.sorting ? ' · phân loại ' + esc(o.sorting) : '') : 'Chưa đẩy lên SuperShip'}</div></div>
     <button class="icon-btn" data-act="drawer-close" aria-label="Đóng">×</button></header>
   <div class="dr-body">
-    <div class="row wrap">${pill(o.status)}<span class="muted sm">${draft ? '' : 'Mã #' + esc(o.status)}${o.lastSync ? ' · kiểm tra ' + ago(o.lastSync) : ''}</span></div>
+    <div class="row wrap">${pill(o.status)}<span class="muted sm">${draft ? '' : 'Mã #' + esc(o.status)}${o.lastSync ? ' · kiểm tra ' + ago(o.lastSync) : ''}${o.printedAt ? ' · đã in vận đơn ' + fmtDate(o.printedAt) : printable(o) ? ' · chưa in vận đơn' : ''}</span></div>
     <div class="row wrap">
       ${draft ? `<button class="btn primary" data-act="o-push" data-id="${o.id}">Đẩy lên SuperShip</button><button class="btn" data-act="o-edit" data-id="${o.id}">Sửa đơn</button><button class="btn danger" data-act="o-delete" data-id="${o.id}">Xoá nháp</button>` : ''}
       ${o.ssCode && !FINAL_CODES.includes(o.status) ? `<button class="btn" data-act="o-sync" data-id="${o.id}">Cập nhật trạng thái</button>` : ''}
@@ -1694,6 +1702,9 @@ const H = {
   'bulk-push': async () => { const list = S.orders.filter(o => UI.sel.has(o.id) && o.status === 'draft'); const r = await runMany(list, pushOrder, 'Đẩy đơn'); if (r.ok) toast(`Đã đẩy ${r.ok} đơn lên SuperShip.`, 'ok'); UI.sel.clear(); render(); },
   'bulk-sync': () => syncMany(S.orders.filter(o => UI.sel.has(o.id) && o.ssCode)),
   'bulk-print': () => printOrders(S.orders.filter(o => UI.sel.has(o.id))),
+  'bulk-printed': a => { const on = a.dataset.v === '1'; const list = S.orders.filter(o => UI.sel.has(o.id) && (on ? printable(o) : o.printedAt));
+    list.forEach(o => { if (on) { o.printedAt = new Date().toISOString(); addLog(o, 'Đánh dấu đã in vận đơn'); } else { delete o.printedAt; addLog(o, 'Đánh dấu chưa in vận đơn'); } });
+    save(); toast(`Đã đánh dấu ${list.length} đơn ${on ? 'đã in' : 'chưa in'}.`, 'ok'); UI.sel.clear(); renderOrdersBody(); },
   'bulk-cancel': () => { const list = S.orders.filter(o => UI.sel.has(o.id) && o.ssCode && ['1','2','3','5'].includes(o.status)); if (!list.length) return toast('Chỉ huỷ được đơn chưa lấy hàng (Chờ duyệt, Chờ lấy, Đang lấy).', 'warn');
     confirmBox('Huỷ đơn trên SuperShip?', `Huỷ ${list.length} đơn chưa lấy hàng. Không thể hoàn tác.`, 'Huỷ đơn', async () => { const r = await runMany(list, cancelOrder, 'Huỷ đơn'); if (r.ok) toast(`Đã huỷ ${r.ok} đơn.`, 'ok'); UI.sel.clear(); render(); }, true); },
   'o-push': async a => { const o = S.orders.find(x => x.id === a.dataset.id); a.disabled = true; try { await pushOrder(o); toast(`Đã đẩy ${o.soc} lên SuperShip (${o.ssCode}).`, 'ok'); } catch(e) { toast(e.message, 'bad', 7000); } render(); },
