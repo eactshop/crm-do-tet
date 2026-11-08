@@ -87,7 +87,8 @@ a{color:var(--accent)}
 .pl td{padding:9px 12px} .pl .op{color:var(--muted);width:18px;font-family:'JetBrains Mono',monospace} .pl tr.total td{font-weight:700;border-top:1px solid var(--line-2)}
 .ch-list{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .bulk-tbl td{padding:4px 4px;vertical-align:top} .bulk-tbl td:first-child{padding:10px 6px 0 12px;color:var(--muted);font-size:12px}
-.bulk-tbl input[type=text]{height:32px;width:100%} .bulk-tbl .st{min-width:220px;padding:8px 8px 0;font-size:12px;line-height:1.45}
+.bulk-tbl input[type=text],.bulk-tbl select{height:32px;width:100%;padding:0 6px}
+.bulk-tbl tr.dr td{border-bottom:0} .bulk-tbl .st-in{position:sticky;left:12px;display:inline-block;max-width:calc(100vw - 340px)} .bulk-tbl tr.sr td{padding:0 6px 8px;font-size:12px;line-height:1.45}
 .bulk-tbl tr.bad td{background:color-mix(in srgb,var(--bad) 5%,transparent)}
 details.panel>summary{cursor:pointer;list-style:none} details.panel>summary::-webkit-details-marker{display:none}
 details.panel:not([open])>summary{border-bottom:0}
@@ -253,7 +254,7 @@ h2.mono{font-size:18px}
    ============================================================ */
 
 // ---------- Hằng số SuperShip ----------
-const STATUS = {'0':'Huỷ','1':'Chờ Duyệt','2':'Chờ Lấy Hàng','3':'Đang Lấy Hàng','4':'Đã Lấy Hàng','5':'Hoãn Lấy Hàng','6':'Không Lấy Được','7':'Đang Nhập Kho','8':'Đã Nhập Kho','9':'Đang Chuyển Kho Giao','10':'Đã Chuyển Kho Giao','11':'Đang Giao Hàng','12':'Đã Giao Hàng Toàn Bộ','13':'Đã Giao Hàng Một Phần','14':'Hoãn Giao Hàng','15':'Không Giao Được','16':'Đã Đối Soát Giao Hàng','17':'Đã Đối Soát Trả Hàng','18':'Đang Chuyển Kho Trả','19':'Đã Chuyển Kho Trả','20':'Đang Trả Hàng','21':'Đã Trả Hàng','22':'Hoãn Trả Hàng','23':'Đang Vận Chuyển','24':'Xác Nhận Hoàn','25':'Hàng Thất Lạc','26':'Không Trả Được','27':'Đã Bồi Hoàn','draft':'Nháp – chưa đẩy'};
+const STATUS = {'0':'Huỷ','1':'Đã Tiếp Nhận','2':'Chờ Lấy Hàng','3':'Đang Lấy Hàng','4':'Đã Lấy Hàng','5':'Hoãn Lấy Hàng','6':'Không Lấy Được','7':'Đang Nhập Kho','8':'Đã Nhập Kho','9':'Đang Chuyển Kho Giao','10':'Đã Chuyển Kho Giao','11':'Đang Giao Hàng','12':'Đã Giao Hàng Toàn Bộ','13':'Đã Giao Hàng Một Phần','14':'Hoãn Giao Hàng','15':'Không Giao Được','16':'Đã Đối Soát Giao Hàng','17':'Đã Đối Soát Trả Hàng','18':'Đang Chuyển Kho Trả','19':'Đã Chuyển Kho Trả','20':'Đang Trả Hàng','21':'Đã Trả Hàng','22':'Hoãn Trả Hàng','23':'Đang Vận Chuyển','24':'Xác Nhận Hoàn','25':'Hàng Thất Lạc','26':'Không Trả Được','27':'Đã Bồi Hoàn','draft':'Nháp – chưa đẩy'};
 const GROUPS = [
   {id:'draft', name:'Nháp', codes:['draft'], tone:'neutral'},
   {id:'pending', name:'Chờ lấy hàng', codes:['1','2','3'], tone:'info'},
@@ -267,6 +268,8 @@ const GROUPS = [
   {id:'incident', name:'Sự cố', codes:['25','26','27'], tone:'bad'},
   {id:'cancelled', name:'Đã huỷ', codes:['0'], tone:'neutral'},
 ];
+// Thứ tự trạng thái theo hành trình đơn trên SuperShip
+const STATUS_ORDER = ['draft','1','2','3','5','6','4','7','8','23','9','10','11','14','15','12','13','16','24','20','22','18','19','21','17','25','26','27','0'];
 const GROUP_BY_CODE = {}; GROUPS.forEach(g => g.codes.forEach(c => GROUP_BY_CODE[c] = g));
 const groupOf = s => GROUP_BY_CODE[String(s)] || GROUPS[0];
 const ISSUE_CODES = ['5','6','14','15','22','25','26'];
@@ -405,6 +408,9 @@ function parseSkuText(text){
 }
 function itemFromProduct(p, qty){ return { sku:p.sku, name:p.name, qty, cost:+p.cost||0, weight:+p.weight||0 }; }
 function calcItems(items){ let subtotal=0, weight=0, cost=0; for (const i of items){ subtotal += (+i.price||0)*(+i.qty||0); weight += (+i.weight||0)*(+i.qty||0); cost += (+i.cost||0)*(+i.qty||0); } return {subtotal, weight, cost}; }
+// Giá vốn luôn lấy theo giá vốn hiện tại trong trang Sản phẩm; sản phẩm đã xoá thì dùng giá lúc tạo đơn
+const productOfItem = i => findProduct(i.sku) || (i.name ? S.products.find(p => p.name === i.name) : null);
+const orderCost = o => sum(o.items || [], i => { const p = productOfItem(i); return (+i.qty || 0) * (p ? +p.cost || 0 : +i.cost || 0); });
 const itemsSummary = o => o.items.map(i => `${i.qty}× ${i.sku || i.name}`).join(', ');
 
 // ---------- Tự nhận tỉnh / quận / phường từ ô địa chỉ ----------
@@ -440,10 +446,16 @@ async function guessArea(text, curProvince){
   const prov = p ? p.x : provs.find(x => x.name === curProvince); if (!prov) return null;
   const out = {province:prov, cut:p ? p.start : F.length, found:!!p};
   const d = findArea(F, await areaDistricts(prov.code), out.cut);
-  if (d){ out.district = d.x; out.cut = d.start; out.found = true;
+  if (d){ out.district = d.x; out.cut = out.cutD = d.start; out.found = true;
     const c = findArea(F, await areaCommunes(d.x.code), d.start);
     if (c){ out.commune = c.x; out.cut = c.start; } }
   return out.found ? out : null;
+}
+// Phần số nhà, đường còn lại sau khi tách tỉnh / quận / phường; tên đường trùng tên phường thì chỉ cắt tới quận
+function streetOf(text, g){
+  const at = n => text.slice(0, n).replace(/[\s,.;–-]+$/, '').trim();
+  let st = at(g.cut); if (!/\p{L}/u.test(st) && g.cutD) st = at(g.cutD);
+  return st.length >= 2 ? st : '';
 }
 let addrSeq = 0, addrT;
 async function autoArea(trim){
@@ -459,7 +471,7 @@ async function autoArea(trim){
   if (v.province !== r.province || v.district !== r.district || v.commune !== r.commune) await $('#rc-prov')._set(v);
   if (my !== addrSeq) return;
   let cut = false;
-  if (trim && g.cut > 0 && g.cut < text.length){ const street = text.slice(0, g.cut).replace(/[\s,.;–-]+$/,'').trim(); if (street.length >= 2){ inp.value = street; r.address = street; cut = true; } }
+  if (trim){ const street = streetOf(text, g); if (street && street !== text){ inp.value = street; r.address = street; cut = true; } }
   if (hint) hint.innerHTML = `<span class="ok-txt">Tự nhận: ${esc([v.commune, v.district, v.province].filter(Boolean).join(', '))}</span>${v.commune ? '' : ' · chọn tiếp ô còn trống bên dưới'}${cut ? ' · đã tách phần số nhà, đường' : ''}`;
 }
 
@@ -802,9 +814,9 @@ function statsFor(a, b){
   const ret = list.filter(o => RETURN_GROUPS.includes(gid(o))); const lost = list.filter(o => gid(o) === 'incident');
   const sold = list.filter(o => !RETURN_GROUPS.includes(gid(o)) && gid(o) !== 'incident');
   const ka = dayKey(a), kb = dayKey(b - 1);
-  const revenue = sum(sold, o => o.subtotal ?? o.amount), ship = sum(list, shipCostOf), cost = sum(sold, o => o.cost);
+  const revenue = sum(sold, o => o.subtotal ?? o.amount), ship = sum(list, shipCostOf), cost = sum(sold, orderCost);
   const ads = sum((S.ads || []).filter(x => x.date >= ka && x.date <= kb), x => x.amount);
-  return { list, sold, ret, lost, ok:sold.filter(o => gid(o) === 'success').length, revenue, ship, cost, ads, profit:revenue - ship - cost - ads, noCost:sold.filter(o => !(+o.cost)).length };
+  return { list, sold, ret, lost, ok:sold.filter(o => gid(o) === 'success').length, revenue, ship, cost, ads, profit:revenue - ship - cost - ads, noCost:sold.filter(o => !orderCost(o)).length };
 }
 const pct = (a, b) => b ? (a / b * 100).toFixed(1).replace('.', ',') + '%' : '—';
 
@@ -831,7 +843,7 @@ function vOverview(){
   <div class="kpis">
     <div class="kpi"><span class="lbl">Doanh thu</span><span class="val sm-val">${fmtMoney(st.revenue)}</span><span class="sub">${st.sold.length} đơn, không tính huỷ, hoàn</span></div>
     <div class="kpi"><span class="lbl">Phí ship</span><span class="val sm-val">${fmtMoney(st.ship)}</span><span class="sub">Phần shop trả, gồm phí hoàn</span></div>
-    <div class="kpi"><span class="lbl">Giá vốn sản phẩm</span><span class="val sm-val">${fmtMoney(st.cost)}</span><span class="sub">${st.noCost ? `<span class="warn-txt">${st.noCost} đơn chưa có giá vốn</span>` : 'Theo giá vốn trong Sản phẩm'}</span></div>
+    <div class="kpi"><span class="lbl">Giá vốn sản phẩm</span><span class="val sm-val">${fmtMoney(st.cost)}</span><span class="sub">${st.noCost ? `<span class="warn-txt">${st.noCost} đơn chưa có giá vốn</span>` : 'Theo giá vốn hiện tại trong Sản phẩm'}</span></div>
     <div class="kpi"><span class="lbl">Quảng cáo</span><span class="val sm-val">${fmtMoney(st.ads)}</span><span class="sub"><a href="#ads">Nhập chi phí ads</a>${st.ads && st.list.length ? ' · ' + fmtMoney(st.ads / st.list.length) + '/đơn' : ''}</span></div>
     <div class="kpi hl"><span class="lbl">Lợi nhuận</span><span class="val sm-val ${st.profit < 0 ? 'bad-txt' : ''}">${fmtMoney(st.profit)}</span><span class="sub">Biên ${pct(st.profit, st.revenue)} doanh thu</span></div>
   </div>
@@ -902,10 +914,13 @@ function matchPrint(o){ const f = UI.printF || 'all'; if (f === 'all') return tr
 function filteredOrders(){ return S.orders.filter(o => inRange(o) && matchQ(o) && matchPrint(o)); }
 function renderOrdersBody(){
   const base = filteredOrders();
-  const list = UI.group === 'all' ? base : base.filter(o => groupOf(o.status).id === UI.group);
-  const counts = {}; base.forEach(o => { const g = groupOf(o.status).id; counts[g] = (counts[g]||0) + 1; });
+  // UI.group: 'all', mã trạng thái SuperShip, hoặc id nhóm (khi bấm từ trang Tổng quan)
+  const byGroup = !STATUS[UI.group] && UI.group !== 'all' && GROUPS.find(g => g.id === UI.group);
+  const list = UI.group === 'all' ? base : base.filter(o => byGroup ? groupOf(o.status).id === UI.group : o.status === UI.group);
+  const counts = {}; base.forEach(o => { counts[o.status] = (counts[o.status]||0) + 1; });
   $('#o-chips').innerHTML = `<div class="chips"><button class="chip ${UI.group==='all'?'on':''}" data-act="group" data-group="all">Tất cả <b>${base.length}</b></button>
-    ${GROUPS.filter(g => counts[g.id] || UI.group === g.id).map(g => `<button class="chip ${UI.group===g.id?'on':''}" data-act="group" data-group="${g.id}">${g.name} <b>${counts[g.id]||0}</b></button>`).join('')}</div>`;
+    ${byGroup ? `<button class="chip on" data-act="group" data-group="all" title="Bỏ lọc nhóm">Nhóm: ${esc(byGroup.name)} <b>${list.length}</b> ×</button>` : ''}
+    ${STATUS_ORDER.filter(c => counts[c] || UI.group === c).map(c => `<button class="chip ${UI.group===c?'on':''}" data-act="group" data-group="${c}">${esc(STATUS[c])} <b>${counts[c]||0}</b></button>`).join('')}</div>`;
   for (const id of [...UI.sel]) if (!S.orders.find(o => o.id === id)) UI.sel.delete(id);
   const sel = S.orders.filter(o => UI.sel.has(o.id));
   $('#o-bulk').innerHTML = sel.length ? `<div class="bulk"><span>Đã chọn ${sel.length} đơn</span>
@@ -1133,103 +1148,208 @@ async function submitForm(push){
 }
 
 // ---------- Trang: Tạo đơn hàng loạt ----------
-const BULK_COLS = [['phone','SĐT *',125],['name','Họ tên *',130],['address','Địa chỉ đầy đủ *',240],['sku','SKU *',120],['price','Giá đơn *',95],['amount','COD',85],['note','Ghi chú',105]];
-const bulkBlank = () => ({phone:'', name:'', address:'', sku:'', price:'', amount:'', note:''});
+const BULK_COLS = [
+  ['phone','SĐT *',120],['name','Họ tên *',140],['address','Số nhà, đường *',200],
+  ['province','Tỉnh / TP *',150,'area'],['district','Quận / Huyện *',150,'area'],['commune','Phường / Xã *',150,'area'],
+  ['product','Sản phẩm',180],['sku','SKU *',120],['qty','SL',56],['price','Giá đơn *',100],['amount','COD',90],['note','Ghi chú',120]];
+// Tên cột khi dán có dòng tiêu đề (đã bỏ dấu, viết liền)
+const BULK_HEAD = {sdt:'phone',sodienthoai:'phone',dienthoai:'phone',ten:'name',hoten:'name',tennguoinhan:'name',nguoinhan:'name',khachhang:'name',
+  diachi:'address',sonha:'address',sonhaduong:'address',diachidaydu:'address',tinh:'province',tinhtp:'province',tinhthanhpho:'province',thanhpho:'province',
+  quan:'district',huyen:'district',quanhuyen:'district',phuong:'commune',xa:'commune',phuongxa:'commune',sanpham:'product',tensanpham:'product',
+  sku:'sku',masp:'sku',masku:'sku',sl:'qty',soluong:'qty',gia:'price',giadon:'price',giadonhang:'price',tienhang:'price',tongtien:'price',cod:'amount',thuho:'amount',thuhocod:'amount',ghichu:'note'};
+const bulkBlank = () => Object.fromEntries(BULK_COLS.map(([k]) => [k, '']));
 const bulkFilled = r => BULK_COLS.some(([k]) => String(r[k] || '').trim());
 const money = v => +String(v || '').replace(/[^\d]/g, '') || 0;
+const ftxt = t => fold(String(t || '').normalize('NFC')).replace(/\s+/g, ' ').trim();
 function bulkState(){ return UI.bulk = UI.bulk || {rows:Array.from({length:5}, bulkBlank), payer:S.settings.payer, config:S.settings.config}; }
+
+// "10 khánh tết", "khánh tết x10", "2 KT + 1 KP" → [{p, n}]
+function matchProduct(text){
+  const bySku = findProduct(String(text).replace(/\s+/g, '')); if (bySku) return bySku;
+  const q = ftxt(text); if (!q) return null;
+  const all = S.products.map(p => ({p, n:ftxt(p.name)}));
+  const ex = all.find(x => x.n === q); if (ex) return ex.p;
+  const words = q.split(' ');
+  const hits = all.filter(x => words.every(w => (' ' + x.n + ' ').includes(' ' + w + ' '))).sort((a, b) => a.n.length - b.n.length);
+  return hits.length ? hits[0].p : null;
+}
+function parseProductText(text){
+  const t = String(text || '').normalize('NFC').trim(); if (!t) return [];
+  const one = str => { let s0 = str.trim(), n = 1, m;
+    if ((m = s0.match(/^(\d+)\s*(?:x|×|\*)?\s+(.+)$/i) || s0.match(/^(\d+)\s*(?:x|×|\*)\s*(.+)$/i))) { n = +m[1]; s0 = m[2]; }
+    else if ((m = s0.match(/^(.+?)\s*(?:x|×|\*)\s*(\d+)$/i))) { n = +m[2]; s0 = m[1]; }
+    const p = matchProduct(s0); return p ? {p, n} : {miss:s0, n}; };
+  const whole = one(t); if (whole.p) return [whole];
+  return t.split(/\s*[+,;]\s*/).filter(Boolean).map(one);
+}
+function applyProduct(r){
+  const res = parseProductText(r.product);
+  if (!res.length || res.some(x => !x.p)) return false;
+  if (res.length === 1){ r.sku = res[0].p.sku; r.qty = String(res[0].n); }
+  else { r.sku = res.map(x => x.n > 1 ? `${x.p.sku}*${x.n}` : x.p.sku).join(' + '); r.qty = ''; }
+  return true;
+}
+const matchArea = (list, text) => { const t = ftxt(text); if (!t) return null; return list.find(x => ftxt(x.name) === t) || (findArea(fold(String(text).normalize('NFC')), list, String(text).length) || {}).x || null; };
+// Địa chỉ đầy đủ trong ô Số nhà, đường → tách ra tỉnh / quận / phường
+async function bulkGuessAddr(r, overwrite){
+  const text = String(r.address || '').trim().normalize('NFC'); if (!text) return false;
+  if (!overwrite && r.province && r.district && r.commune) return false;
+  const g = await guessArea(text, r.province); if (!g) return false;
+  if (g.province.name !== r.province){ r.province = g.province.name; r.district = ''; r.commune = ''; }
+  if (g.district){ r.district = g.district.name; r.commune = g.commune ? g.commune.name : ''; }
+  r.address = streetOf(text, g) || r.address;
+  return true;
+}
+
 function vBulk(){
   const B = bulkState();
-  return `${newOrderTabs('bulk-order')}<div class="page-head"><div><h1>Tạo đơn hàng loạt</h1><p>Mỗi dòng một đơn. Có thể dán thẳng từ Excel / Google Sheets theo thứ tự cột: <strong>SĐT, Họ tên, Địa chỉ, SKU, Giá đơn, COD, Ghi chú</strong>. Địa chỉ ghi đủ phường, quận, tỉnh để CRM tự nhận.</p></div>
+  return `${newOrderTabs('bulk-order')}<div class="page-head"><div><h1>Tạo đơn hàng loạt</h1><p>Mỗi dòng một đơn. Ô <strong>Sản phẩm</strong> gõ kiểu “10 khánh tết” sẽ tự điền SKU và SL. Ô <strong>Số nhà, đường</strong> dán cả địa chỉ đầy đủ sẽ tự chọn tỉnh, quận, phường. Dán từ Excel / Google Sheets: có dòng tiêu đề thì CRM tự khớp cột theo tên, không có thì dán theo thứ tự cột trong bảng.</p></div>
     <div class="row wrap"><button class="btn ghost" data-act="bulk-clear-all">Xoá hết</button></div></div>
   <div class="panel">
     <div class="toolbar">
-      <select id="bk-payer" aria-label="Người trả phí ship">${Object.entries(PAYER_OPTS).map(([k,v]) => `<option value="${k}" ${B.payer===k?'selected':''}>${v}</option>`).join('')}</select>
-      <select id="bk-config" aria-label="Khi giao">${Object.entries(CONFIG_OPTS).map(([k,v]) => `<option value="${k}" ${B.config===k?'selected':''}>${v}</option>`).join('')}</select>
+      <select id="bk-payer" aria-label="Người trả phí ship" style="width:auto">${Object.entries(PAYER_OPTS).map(([k,v]) => `<option value="${k}" ${B.payer===k?'selected':''}>${v}</option>`).join('')}</select>
+      <select id="bk-config" aria-label="Khi giao" style="width:auto">${Object.entries(CONFIG_OPTS).map(([k,v]) => `<option value="${k}" ${B.config===k?'selected':''}>${v}</option>`).join('')}</select>
       <span class="muted sm" id="bulk-count"></span>
     </div>
-    <div class="tbl-wrap"><table class="tbl compact bulk-tbl"><thead><tr><th>#</th>${BULK_COLS.map(([, l, w]) => `<th style="min-width:${w}px;width:${w}px">${l}</th>`).join('')}<th>Kiểm tra</th><th></th></tr></thead><tbody id="bulk-body"></tbody></table></div>
+    <datalist id="bk-prods">${S.products.map(p => `<option value="${esc(p.name)}">${esc(p.sku)}</option>`).join('')}</datalist>
+    <datalist id="bk-skus">${S.products.map(p => `<option value="${esc(p.sku)}">${esc(p.name)}</option>`).join('')}</datalist>
+    <div class="tbl-wrap"><table class="tbl compact bulk-tbl"><thead><tr><th>#</th>${BULK_COLS.map(([, l, w]) => `<th style="min-width:${w}px;width:${w}px">${l}</th>`).join('')}<th></th></tr></thead><tbody id="bulk-body"></tbody></table></div>
     <div class="toolbar" style="border-top:1px solid var(--line);border-bottom:0">
       <button class="btn sm" data-act="bulk-add">+ Thêm 5 dòng</button>
-      <span class="muted sm">Khách cũ: chỉ cần SĐT, để trống tên và địa chỉ sẽ lấy theo đơn gần nhất. COD để trống = bằng giá đơn.</span>
+      <span class="muted sm">Khách cũ: chỉ cần SĐT, để trống tên và địa chỉ sẽ lấy theo đơn gần nhất. SL để trống = 1. COD để trống = bằng giá đơn.</span>
       <span style="flex:1"></span>
       <button class="btn" data-act="bulk-create">Tạo đơn nháp</button><button class="btn primary" data-act="bulk-create-push">Tạo & đẩy lên SuperShip</button>
     </div>
   </div>`;
 }
-function renderBulkBody(){
-  const B = UI.bulk; const body = $('#bulk-body'); if (!body) return;
-  body.innerHTML = B.rows.map((r, i) => `<tr data-r="${i}"><td>${i + 1}</td>${BULK_COLS.map(([k, l]) => `<td><input type="text" data-bk="${k}" data-r="${i}" value="${esc(r[k])}" aria-label="${esc(l.replace(' *', ''))} dòng ${i + 1}" ${['phone','sku'].includes(k) ? 'class="mono"' : ['price','amount'].includes(k) ? 'class="num" inputmode="numeric"' : ''} autocomplete="off"></td>`).join('')}<td class="st" id="bst-${i}"></td><td><button class="btn sm ghost" data-act="bulk-del-row" data-r="${i}" aria-label="Xoá dòng ${i + 1}">×</button></td></tr>`).join('');
-  B.rows.forEach((_, i) => paintBulk(i));
+function bulkRowHTML(r, i){
+  const cells = BULK_COLS.map(([k, l, , kind]) => {
+    const lab = esc(`${l.replace(' *', '')} dòng ${i + 1}`);
+    if (kind === 'area') return `<td><select data-bk="${k}" data-r="${i}" aria-label="${lab}">${r[k] ? `<option selected>${esc(r[k])}</option>` : '<option value="">—</option>'}</select></td>`;
+    const num = ['price','amount','qty'].includes(k);
+    return `<td><input type="text" data-bk="${k}" data-r="${i}" value="${esc(r[k])}" class="${['phone','sku'].includes(k) ? 'mono' : num ? 'num' : ''}" ${k === 'product' ? 'list="bk-prods"' : k === 'sku' ? 'list="bk-skus"' : ''} ${num ? 'inputmode="numeric"' : ''} aria-label="${lab}" autocomplete="off"></td>`;
+  }).join('');
+  return `<tr class="dr" data-r="${i}"><td>${i + 1}</td>${cells}<td><button class="btn sm ghost" data-act="bulk-del-row" data-r="${i}" aria-label="Xoá dòng ${i + 1}">×</button></td></tr>
+    <tr class="sr" data-r="${i}"><td></td><td colspan="${BULK_COLS.length + 1}" class="st" id="bst-${i}"></td></tr>`;
+}
+async function fillRowSelects(i){
+  const r = UI.bulk && UI.bulk.rows[i]; const tr = $(`#bulk-body tr.dr[data-r="${i}"]`); if (!r || !tr) return;
+  const sel = k => tr.querySelector(`[data-bk="${k}"]`);
+  const put = (el, list, cur, ph) => { const has = list.some(x => x.name === cur);
+    el.innerHTML = `<option value="">${ph}</option>` + (cur && !has ? `<option selected>${esc(cur)}</option>` : '') + list.map(x => `<option ${x.name === cur ? 'selected' : ''}>${esc(x.name)}</option>`).join(''); };
+  try {
+    const provs = await areaProvinces(); put(sel('province'), provs, r.province, 'Chọn tỉnh');
+    const p = provs.find(x => x.name === r.province);
+    const dists = p ? await areaDistricts(p.code) : []; put(sel('district'), dists, r.district, p ? 'Chọn quận' : '—');
+    const d = dists.find(x => x.name === r.district);
+    const comms = d ? await areaCommunes(d.code) : []; put(sel('commune'), comms, r.commune, d ? 'Chọn phường' : '—');
+  } catch(e) {}
+}
+async function renderBulkBody(){
+  const body = $('#bulk-body'); if (!body) return;
+  body.innerHTML = UI.bulk.rows.map(bulkRowHTML).join('');
+  UI.bulk.rows.forEach((_, i) => paintBulk(i));
+  for (let i = 0; i < UI.bulk.rows.length; i++) await fillRowSelects(i);
+}
+async function renderBulkRow(i){
+  const tr = $(`#bulk-body tr.dr[data-r="${i}"]`); if (!tr) return;
+  const a = document.activeElement; const fk = a && a.dataset && a.dataset.r === String(i) ? a.dataset.bk : null;
+  const tmp = document.createElement('tbody'); tmp.innerHTML = bulkRowHTML(UI.bulk.rows[i], i);
+  tr.replaceWith(tmp.querySelector('tr.dr'));
+  if (fk){ const el = $(`#bulk-body [data-bk="${fk}"][data-r="${i}"]`); if (el) el.focus(); }
+  paintBulk(i); await fillRowSelects(i);
 }
 function paintBulk(i){
   const r = UI.bulk.rows[i]; const cell = $('#bst-' + i); if (!cell || !r) return;
-  const c = r._chk; const tr = cell.parentElement; tr.classList.toggle('bad', !!(c && c.errs.length));
-  if (!bulkFilled(r)) cell.innerHTML = '';
-  else if (!c) cell.innerHTML = '<span class="muted">Đang kiểm tra…</span>';
-  else if (c.errs.length) cell.innerHTML = `<span class="bad-txt">${esc(c.errs.join(' · '))}</span>`;
-  else cell.innerHTML = `<span class="ok-txt">✓</span> ${esc([c.area.commune, c.area.district, shortProv(c.area.province)].join(', '))}<br><span class="muted">${esc(c.items.map(x => x.qty + '× ' + x.sku).join(', '))} · COD ${fmtNum(c.amount)}</span>${c.oldAddr ? '<br><span class="muted">Dùng địa chỉ đơn cũ</span>' : ''}${c.risk ? '<br><span class="warn-txt">⚠ Khách có rủi ro hoàn hàng</span>' : ''}`;
+  const c = r._chk; const bad = !!(c && c.errs.length);
+  $$(`#bulk-body tr[data-r="${i}"]`).forEach(tr => tr.classList.toggle('bad', bad));
+  const put = h => { cell.innerHTML = h ? `<div class="st-in">${h}</div>` : ''; };
+  if (!bulkFilled(r)) put('');
+  else if (!c) put('<span class="muted">Đang kiểm tra…</span>');
+  else if (bad) put(`<span class="bad-txt">✕ ${esc(c.errs.join(' · '))}</span>`);
+  else put(`<span class="ok-txt">✓</span> ${esc(c.items.map(x => x.qty + '× ' + x.name).join(', '))} · <span class="muted">COD ${fmtNum(c.amount)}</span>${c.oldAddr ? ' · <span class="muted">dùng địa chỉ đơn cũ</span>' : ''}${c.risk ? ' · <span class="warn-txt">⚠ khách có rủi ro hoàn hàng</span>' : ''}`);
   const filled = UI.bulk.rows.filter(bulkFilled); const ok = filled.filter(x => x._chk && !x._chk.errs.length).length;
   const cnt = $('#bulk-count'); if (cnt) cnt.innerHTML = filled.length ? `${filled.length} đơn · <span class="ok-txt">${ok} hợp lệ</span>${filled.length - ok ? ` · <span class="bad-txt">${filled.length - ok} cần sửa</span>` : ''}` : '';
 }
+const bulkKey = r => JSON.stringify(BULK_COLS.map(([k]) => r[k]));
 async function bulkCheck(i){
   const r = UI.bulk.rows[i]; if (!r) return;
-  const key = JSON.stringify(BULK_COLS.map(([k]) => r[k]));
-  if (r._key === key && r._chk !== undefined) return; r._key = key;
+  const key = bulkKey(r);
+  if (r._key === key && r._chk !== undefined) return;
+  r._key = key;
   if (!bulkFilled(r)){ r._chk = null; paintBulk(i); return; }
   r._chk = null; paintBulk(i);
   const errs = []; const phone = normPhone(r.phone);
   if (!phone) errs.push('thiếu SĐT'); else if (phone.length < 9 || phone.length > 11) errs.push('SĐT sai');
   const cust = phone ? customerMap().get(phone) : null;
-  if (!r.name.trim() && cust){ r.name = cust.name; const inp = $(`[data-bk="name"][data-r="${i}"]`); if (inp) inp.value = r.name; }
+  if (!r.name.trim() && cust) r.name = cust.name;
   if (!r.name.trim()) errs.push('thiếu tên');
-  const parts = parseSkuText(r.sku); const bad = parts.filter(x => !x.product);
-  if (!r.sku.trim()) errs.push('thiếu SKU'); else if (bad.length) errs.push('không có SKU ' + bad.map(x => x.sku).join(', '));
-  const items = []; parts.filter(x => x.product).forEach(x => { const ex = items.find(it => it.sku === x.sku); if (ex) ex.qty += x.mult; else items.push(itemFromProduct(x.product, x.mult)); });
-  if (String(r.price).trim() === '') errs.push('thiếu giá đơn');
-  let area = null, street = r.address.trim().normalize('NFC'), oldAddr = false;
-  if (!street && cust){ const rc = cust.receiver; area = {province:rc.province, district:rc.district, commune:rc.commune}; street = rc.address; oldAddr = true; }
-  else if (!street) errs.push('thiếu địa chỉ');
-  else {
-    try {
-      const g = await guessArea(street, '');
-      if (r._key !== key) return;
-      if (!g) errs.push('không nhận ra tỉnh/quận trong địa chỉ');
-      else {
-        area = {province:g.province.name, district:g.district ? g.district.name : '', commune:g.commune ? g.commune.name : ''};
-        if (!area.district) errs.push('không nhận ra quận/huyện'); else if (!area.commune) errs.push('không nhận ra phường/xã');
-        const st = street.slice(0, g.cut).replace(/[\s,.;–-]+$/, '').trim(); if (st.length >= 2) street = st; else errs.push('thiếu số nhà, đường');
-      }
-    } catch(e) { errs.push(e.message); }
-  }
+  // địa chỉ
+  let oldAddr = false;
+  if (!r.address.trim() && !r.province && cust){ const rc = cust.receiver; Object.assign(r, {address:rc.address, province:rc.province, district:rc.district, commune:rc.commune}); oldAddr = true; }
+  try { await bulkGuessAddr(r, false); } catch(e) {}
+  try {
+    const provs = await areaProvinces(); const p = matchArea(provs, r.province);
+    if (p){ r.province = p.name; const ds = await areaDistricts(p.code); const d = matchArea(ds, r.district);
+      if (d){ r.district = d.name; const cs = await areaCommunes(d.code); const c = matchArea(cs, r.commune);
+        if (c) r.commune = c.name; else errs.push(r.commune ? `không có phường/xã “${r.commune}”` : 'chọn phường/xã'); }
+      else errs.push(r.district ? `không có quận/huyện “${r.district}”` : 'chọn quận/huyện'); }
+    else errs.push(r.province ? `không có tỉnh “${r.province}”` : 'chọn tỉnh, hoặc ghi đủ địa chỉ để tự nhận');
+  } catch(e) { errs.push(e.message); }
   if (r._key !== key) return;
-  r._chk = {errs, phone, items, price:money(r.price), amount:String(r.amount).trim() === '' ? money(r.price) : money(r.amount), area, street, oldAddr, risk:!!(cust && cust.risk)};
-  paintBulk(i);
+  if (!r.address.trim()) errs.push('thiếu số nhà, đường');
+  // sản phẩm
+  if (r.product.trim() && !r.sku.trim() && !applyProduct(r)) errs.push(`không tìm thấy sản phẩm “${parseProductText(r.product).filter(x => !x.p).map(x => x.miss).join(', ') || r.product.trim()}”`);
+  const parts = parseSkuText(r.sku); const missing = parts.filter(x => !x.product);
+  if (!r.sku.trim()){ if (!r.product.trim()) errs.push('thiếu sản phẩm'); }
+  else if (missing.length) errs.push('không có SKU ' + missing.map(x => x.sku).join(', '));
+  const q = Math.max(1, money(r.qty) || 1);
+  const items = []; parts.filter(x => x.product).forEach(x => { const n = x.mult * (parts.length === 1 ? q : 1); const ex = items.find(it => it.sku === x.sku); if (ex) ex.qty += n; else items.push(itemFromProduct(x.product, n)); });
+  if (String(r.price).trim() === '') errs.push('thiếu giá đơn');
+  const changed = bulkKey(r) !== key; r._key = bulkKey(r);
+  r._chk = {errs, phone, items, price:money(r.price), amount:String(r.amount).trim() === '' ? money(r.price) : money(r.amount), oldAddr, risk:!!(cust && cust.risk)};
+  if (changed) await renderBulkRow(i); else paintBulk(i);
 }
-// Kiểm tra lần lượt để không gọi trùng danh mục địa chỉ cùng lúc
+// Chạy lần lượt để không gọi trùng danh mục địa chỉ cùng lúc
 let bulkRun = Promise.resolve();
-function bulkCheckAll(){ return bulkRun = bulkRun.catch(() => {}).then(async () => { for (let i = 0; i < UI.bulk.rows.length; i++) await bulkCheck(i); }); }
+const bulkQueue = fn => bulkRun = bulkRun.catch(() => {}).then(fn);
+function bulkCheckAll(){ return bulkQueue(async () => { for (let i = 0; i < UI.bulk.rows.length; i++) await bulkCheck(i); }); }
 function afterBulk(){
-  const B = UI.bulk; renderBulkBody(); bulkCheckAll();
+  const B = UI.bulk; bulkQueue(() => renderBulkBody()); bulkCheckAll();
   $('#bk-payer').onchange = e => { B.payer = e.target.value; };
   $('#bk-config').onchange = e => { B.config = e.target.value; };
   const body = $('#bulk-body');
-  body.addEventListener('input', e => { const t = e.target; if (!t.dataset.bk) return; B.rows[+t.dataset.r][t.dataset.bk] = t.value; });
-  body.addEventListener('change', e => { const t = e.target; if (!t.dataset.bk) return; bulkRun = bulkRun.catch(() => {}).then(() => bulkCheck(+t.dataset.r)); });
+  body.addEventListener('input', e => { const t = e.target; if (t.tagName === 'INPUT' && t.dataset.bk) B.rows[+t.dataset.r][t.dataset.bk] = t.value; });
+  body.addEventListener('change', e => {
+    const t = e.target; const k = t.dataset.bk; if (!k) return; const i = +t.dataset.r; const r = B.rows[i];
+    r[k] = t.value;
+    if (k === 'province'){ r.district = ''; r.commune = ''; }
+    if (k === 'district') r.commune = '';
+    if (k === 'product'){ if (!r.product.trim() || !applyProduct(r)) r.sku = r.product.trim() ? '' : r.sku; }
+    bulkQueue(async () => {
+      if (k === 'address') await bulkGuessAddr(r, true).catch(() => {});
+      if (['address','province','district','product'].includes(k)) await renderBulkRow(i);
+      await bulkCheck(i);
+    });
+  });
   body.addEventListener('paste', e => {
     const t = e.target; if (!t.dataset.bk) return;
     const text = (e.clipboardData || window.clipboardData).getData('text').replace(/\r/g, '');
     if (!/[\t\n]/.test(text.trim())) return;
     e.preventDefault();
-    let lines = text.split('\n'); while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-    if (/s[dđ]t|đi[eệ]n tho[aạ]i|h[oọ] t[eê]n|ng[uư][oờ]i nh[aậ]n/i.test(lines[0] || '')) lines.shift();
-    const r0 = +t.dataset.r, c0 = BULK_COLS.findIndex(([k]) => k === t.dataset.bk);
+    const lines = text.split('\n'); while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    const head = (lines[0] || '').split('\t').map(h => BULK_HEAD[normKey(h)]);
+    let cols;
+    if (head.filter(Boolean).length >= 2){ cols = head; lines.shift(); }
+    else { const c0 = BULK_COLS.findIndex(([k]) => k === t.dataset.bk); cols = BULK_COLS.slice(c0).map(c => c[0]); }
+    const r0 = +t.dataset.r;
     lines.forEach((ln, j) => {
-      const row = B.rows[r0 + j] || (B.rows[r0 + j] = bulkBlank());
-      ln.split('\t').forEach((v, k) => { const col = BULK_COLS[c0 + k]; if (col) row[col[0]] = v.trim(); });
+      const row = B.rows[r0 + j] = Object.assign(B.rows[r0 + j] || bulkBlank(), {_key:undefined, _chk:undefined});
+      ln.split('\t').forEach((v, k) => { if (cols[k]) row[cols[k]] = v.trim(); });
+      if (row.product && !row.sku) applyProduct(row);
     });
-    renderBulkBody(); bulkCheckAll();
-    toast(`Đã dán ${lines.length} dòng.`, 'ok', 2000);
+    bulkQueue(() => renderBulkBody()); bulkCheckAll();
+    toast(`Đã dán ${lines.length} dòng${head.filter(Boolean).length >= 2 ? ', khớp cột theo tiêu đề' : ''}.`, 'ok', 2500);
   });
 }
 async function bulkCreate(push){
@@ -1242,11 +1362,11 @@ async function bulkCreate(push){
     for (const r of good){
       const c = r._chk; const t = calcItems(c.items);
       const o = {id:uid(), soc:nextSoc(now), createdAt:now, updatedAt:now, status:'draft', journeys:[], ssNotes:[], log:[], issue:{handled:false, note:''}, fee:{shipment:0, insurance:0, return:0},
-        receiver:{name:r.name.trim(), phone:c.phone, address:c.street, ...c.area}, items:c.items, subtotal:c.price, amount:c.amount, value:c.price, weight:t.weight, cost:t.cost,
+        receiver:{name:r.name.trim(), phone:c.phone, address:r.address.trim(), province:r.province, district:r.district, commune:r.commune}, items:c.items, subtotal:c.price, amount:c.amount, value:c.price, weight:t.weight, cost:t.cost,
         payer:B.payer, config:B.config, note:r.note.trim()};
       addLog(o, 'Tạo hàng loạt'); created.push(o);
     }
-    S.orders.unshift(...created.reverse());
+    S.orders.unshift(...created.slice().reverse());
     B.rows = B.rows.filter(r => !good.includes(r)); while (B.rows.length < 5) B.rows.push(bulkBlank());
     save();
     if (push){
@@ -1255,7 +1375,7 @@ async function bulkCreate(push){
       UI.group = res.fail ? 'draft' : 'all';
     } else { toast(`Đã tạo ${created.length} đơn nháp và chọn sẵn. Bấm “Đẩy lên SuperShip” khi sẵn sàng.`, 'ok', 6000); UI.group = 'draft'; }
     UI.sel.clear(); created.filter(o => o.status === 'draft').forEach(o => UI.sel.add(o.id));
-    if (bad) { toast(`${bad} dòng lỗi vẫn giữ ở trang Hàng loạt để sửa.`, 'warn', 7000); render(); } else go('orders');
+    if (bad){ toast(`${bad} dòng lỗi vẫn giữ ở trang Hàng loạt để sửa.`, 'warn', 7000); render(); } else go('orders');
   };
   if (bad) confirmBox(`Tạo ${good.length} đơn hợp lệ?`, `${bad} dòng đang lỗi sẽ được giữ lại để sửa sau.`, 'Tạo ' + good.length + ' đơn', run); else run();
 }
@@ -1482,7 +1602,7 @@ function vCod(){
   const retd = S.orders.filter(o => RETURN_GROUPS.includes(groupOf(o.status).id));
   const feeOf = o => (o.fee.shipment||0) + (o.fee.insurance||0) + (o.fee.return||0);
   const net = o => o.amount - (o.payer === '1' ? (o.fee.shipment||0) + (o.fee.insurance||0) : 0);
-  const profit = sum(succ, o => o.amount - (o.payer === '1' ? feeOf(o) : 0) - (o.cost||0)) - sum(retd, o => (o.payer === '1' ? feeOf(o) : (o.fee.shipment||0) + (o.fee.return||0)));
+  const profit = sum(succ, o => o.amount - (o.payer === '1' ? feeOf(o) : 0) - orderCost(o)) - sum(retd, o => (o.payer === '1' ? feeOf(o) : (o.fee.shipment||0) + (o.fee.return||0)));
   return `<div class="page-head"><div><h1>Đối soát COD</h1><p>SuperShip chưa có API bảng kê tiền. Đơn chuyển sang “Đã Đối Soát Giao Hàng” (#16) sẽ tự sang mục đã đối soát khi bạn cập nhật trạng thái.</p></div><button class="btn" data-act="sync-all">Cập nhật trạng thái</button></div>
   <div class="kpis">
     <div class="kpi"><span class="lbl">Chờ đối soát</span><span class="val">${fmtMoney(sum(waitL, net))}</span><span class="sub">${waitL.length} đơn đã giao · tiền thực nhận sau phí</span></div>
@@ -1705,7 +1825,7 @@ const H = {
   'bulk-printed': a => { const on = a.dataset.v === '1'; const list = S.orders.filter(o => UI.sel.has(o.id) && (on ? printable(o) : o.printedAt));
     list.forEach(o => { if (on) { o.printedAt = new Date().toISOString(); addLog(o, 'Đánh dấu đã in vận đơn'); } else { delete o.printedAt; addLog(o, 'Đánh dấu chưa in vận đơn'); } });
     save(); toast(`Đã đánh dấu ${list.length} đơn ${on ? 'đã in' : 'chưa in'}.`, 'ok'); UI.sel.clear(); renderOrdersBody(); },
-  'bulk-cancel': () => { const list = S.orders.filter(o => UI.sel.has(o.id) && o.ssCode && ['1','2','3','5'].includes(o.status)); if (!list.length) return toast('Chỉ huỷ được đơn chưa lấy hàng (Chờ duyệt, Chờ lấy, Đang lấy).', 'warn');
+  'bulk-cancel': () => { const list = S.orders.filter(o => UI.sel.has(o.id) && o.ssCode && ['1','2','3','5'].includes(o.status)); if (!list.length) return toast('Chỉ huỷ được đơn chưa lấy hàng (Đã tiếp nhận, Chờ lấy hàng, Đang lấy hàng, Hoãn lấy hàng).', 'warn');
     confirmBox('Huỷ đơn trên SuperShip?', `Huỷ ${list.length} đơn chưa lấy hàng. Không thể hoàn tác.`, 'Huỷ đơn', async () => { const r = await runMany(list, cancelOrder, 'Huỷ đơn'); if (r.ok) toast(`Đã huỷ ${r.ok} đơn.`, 'ok'); UI.sel.clear(); render(); }, true); },
   'o-push': async a => { const o = S.orders.find(x => x.id === a.dataset.id); a.disabled = true; try { await pushOrder(o); toast(`Đã đẩy ${o.soc} lên SuperShip (${o.ssCode}).`, 'ok'); } catch(e) { toast(e.message, 'bad', 7000); } render(); },
   'o-sync': async a => { const o = S.orders.find(x => x.id === a.dataset.id); a.disabled = true; try { const ch = await syncOrder(o); toast(ch ? 'Trạng thái mới: ' + STATUS[o.status] : 'Chưa có thay đổi.', ch ? 'ok' : 'info'); } catch(e) { toast(e.message, 'bad'); } render(); },
@@ -1722,8 +1842,8 @@ const H = {
   'item-del': a => { UI.form.items.splice(+a.dataset.i, 1); if (!UI.form.items.length) UI.form.items.push({sku:'', name:'', qty:1, cost:0, weight:0}); renderItems(); renderSummary(); scheduleFee(); },
   'fill-cust': a => { const c = customerMap().get(a.dataset.phone); if (!c) return; Object.assign(UI.form.receiver, {...c.receiver}); render(); },
   'form-save': () => submitForm(false),
-  'bulk-add': () => { for (let i = 0; i < 5; i++) UI.bulk.rows.push(bulkBlank()); renderBulkBody(); },
-  'bulk-del-row': a => { UI.bulk.rows.splice(+a.dataset.r, 1); if (!UI.bulk.rows.length) UI.bulk.rows.push(bulkBlank()); renderBulkBody(); },
+  'bulk-add': () => { for (let i = 0; i < 5; i++) UI.bulk.rows.push(bulkBlank()); bulkQueue(() => renderBulkBody()); },
+  'bulk-del-row': a => { UI.bulk.rows.splice(+a.dataset.r, 1); if (!UI.bulk.rows.length) UI.bulk.rows.push(bulkBlank()); bulkQueue(() => renderBulkBody()); },
   'bulk-clear-all': () => confirmBox('Xoá hết các dòng?', 'Chỉ xoá bảng nhập, không ảnh hưởng đơn đã tạo.', 'Xoá hết', () => { UI.bulk = null; render(); }),
   'bulk-create': () => bulkCreate(false),
   'bulk-create-push': () => bulkCreate(true),

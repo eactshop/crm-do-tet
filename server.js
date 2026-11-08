@@ -76,8 +76,15 @@ function applyChanges(ch){
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
+// Sửa một lần các đơn kéo từ SuperShip trước khi có normalizeSuperShipOrder (payer/config dạng chữ)
+function fixPulledOrders(){
+  for (const r of db.prepare(`SELECT data FROM orders WHERE data LIKE '%"source":"supership"%'`).all()){
+    const o = JSON.parse(r.data); if (normalizeSuperShipOrder(o, null)) upsertOrder(o);
+  }
+}
+
 // ---------- SuperShip (gọi từ server, dùng token lưu trong Cài đặt) ----------
-const STATUS_NAMES = {'0':'Huỷ','1':'Chờ Duyệt','2':'Chờ Lấy Hàng','3':'Đang Lấy Hàng','4':'Đã Lấy Hàng','5':'Hoãn Lấy Hàng','6':'Không Lấy Được','7':'Đang Nhập Kho','8':'Đã Nhập Kho','9':'Đang Chuyển Kho Giao','10':'Đã Chuyển Kho Giao','11':'Đang Giao Hàng','12':'Đã Giao Hàng Toàn Bộ','13':'Đã Giao Hàng Một Phần','14':'Hoãn Giao Hàng','15':'Không Giao Được','16':'Đã Đối Soát Giao Hàng','17':'Đã Đối Soát Trả Hàng','18':'Đang Chuyển Kho Trả','19':'Đã Chuyển Kho Trả','20':'Đang Trả Hàng','21':'Đã Trả Hàng','22':'Hoãn Trả Hàng','23':'Đang Vận Chuyển','24':'Xác Nhận Hoàn','25':'Hàng Thất Lạc','26':'Không Trả Được','27':'Đã Bồi Hoàn'};
+const STATUS_NAMES = {'0':'Huỷ','1':'Đã Tiếp Nhận','2':'Chờ Lấy Hàng','3':'Đang Lấy Hàng','4':'Đã Lấy Hàng','5':'Hoãn Lấy Hàng','6':'Không Lấy Được','7':'Đang Nhập Kho','8':'Đã Nhập Kho','9':'Đang Chuyển Kho Giao','10':'Đã Chuyển Kho Giao','11':'Đang Giao Hàng','12':'Đã Giao Hàng Toàn Bộ','13':'Đã Giao Hàng Một Phần','14':'Hoãn Giao Hàng','15':'Không Giao Được','16':'Đã Đối Soát Giao Hàng','17':'Đã Đối Soát Trả Hàng','18':'Đang Chuyển Kho Trả','19':'Đã Chuyển Kho Trả','20':'Đang Trả Hàng','21':'Đã Trả Hàng','22':'Hoãn Trả Hàng','23':'Đang Vận Chuyển','24':'Xác Nhận Hoàn','25':'Hàng Thất Lạc','26':'Không Trả Được','27':'Đã Bồi Hoàn'};
 const ISSUE_CODES = ['5','6','14','15','22','25','26'];
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 const num = v => +String(v ?? '').replace(/[^\d.-]/g, '') || 0;
@@ -92,6 +99,23 @@ async function ssApi(method, apiPath, { query, body } = {}){
   const ok = data && data.status ? String(data.status).toLowerCase() === 'success' : res.ok;
   if (!res.ok || !ok) throw new Error((data && (data.message || data.error)) || ('SuperShip trả lỗi HTTP ' + res.status));
   return data.results || data;
+}
+// orders/info trả người trả phí, cách giao dạng chữ ("Người Gửi", "Cho Xem Hàng Nhưng Không Cho Thử") và địa chỉ gộp một chuỗi
+const payerCode = v => { const t = String(v ?? '').toLowerCase(); return /^[12]$/.test(t) ? t : /gửi|gui/.test(t) ? '1' : /nhận|nhan/.test(t) ? '2' : null; };
+const configCode = v => { const t = String(v ?? '').toLowerCase(); return /^[123]$/.test(t) ? t : /không cho xem|khong cho xem/.test(t) ? '3' : /không cho thử|khong cho thu/.test(t) ? '1' : /thử|thu/.test(t) ? '2' : null; };
+function splitAddress(rc){
+  const fa = String(rc.formatted_address || '').split(',').map(x => x.trim()).filter(Boolean);
+  if (rc.province || fa.length < 4) return null;
+  return { address: rc.address || fa.slice(0, -3).join(', '), commune: fa[fa.length - 3], district: fa[fa.length - 2], province: fa[fa.length - 1] };
+}
+function normalizeSuperShipOrder(o, info){
+  let ch = false;
+  const pc = payerCode(info ? info.payer : o.payer); if (pc && pc !== o.payer){ o.payer = pc; ch = true; }
+  const cc = configCode(info ? info.config : o.config); if (cc && cc !== o.config){ o.config = cc; ch = true; }
+  const rc = info && info.receiver && typeof info.receiver === 'object' ? info.receiver : null;
+  const sp = rc && !o.receiver.province ? splitAddress(rc) : null;
+  if (sp){ Object.assign(o.receiver, sp); ch = true; }
+  return ch;
 }
 const addLog = (o, text) => (o.log = o.log || []).push({ time: new Date().toISOString(), text });
 // Ghi thông tin SuperShip (orders/info hoặc payload webhook) vào đơn CRM; tạo đơn mới nếu CRM chưa có.
@@ -128,6 +152,7 @@ function applySuperShip(info, how){
   if (info.fee && typeof info.fee === 'object') o.fee = { shipment: num(info.fee.shipment), insurance: num(info.fee.insurance), return: num(info.fee.return) };
   else if (info.fshipment != null) o.fee = Object.assign({}, o.fee, { shipment: num(info.fshipment), insurance: num(info.finsurance ?? (o.fee || {}).insurance) });
   if (info.type === 'update_weight' && info.weight != null) o.weight = num(info.weight);
+  if (o.source === 'supership') normalizeSuperShipOrder(o, info);
   o.lastSync = now;
   const rev = q.maxRev.get().rev + 1;
   db.exec('BEGIN');
@@ -199,6 +224,7 @@ function authorized(req){
   return h.startsWith('Basic ') && Buffer.from(h.slice(6), 'base64').toString('utf8') === AUTH;
 }
 
+fixPulledOrders();
 http.createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/hook/supership/' + hookSecret()){
     let payload; try { payload = await readBody(req); } catch (e) { return send(res, 400, { error: e.message }); }
