@@ -327,7 +327,7 @@ function setState(d){ S = Object.assign(defaults(), d); S.settings = Object.assi
 async function load(){
   const r = await fetch('api/state', {cache:'no-store'});
   if (!r.ok) throw new Error('Server trả lỗi ' + r.status);
-  const {state, rev} = await r.json(); UI.rev = rev || 0;
+  const {state, rev, build} = await r.json(); UI.rev = rev || 0; UI.build = build;
   if (state) { setState(state); markSaved(); return; }
   // DB trống: chuyển dữ liệu cũ từ localStorage lên (nếu có), không thì tạo dữ liệu mẫu
   let old = null; try { old = JSON.parse(localStorage.getItem(KEY)); } catch(e) {}
@@ -388,6 +388,11 @@ async function pollServer(){
   if (!S || document.hidden) return;
   try {
     const r = await serverApi('GET', 'api/orders?after=' + UI.rev); UI.rev = r.rev;
+    if (r.build && UI.build && r.build !== UI.build && !UI.newBuild){
+      UI.newBuild = true;
+      const t = toast('Có bản CRM mới – bấm vào đây để tải lại trang.', 'warn', 3600e3);
+      t.style.cursor = 'pointer'; t.onclick = async () => { try { await flush(true); } catch(e) {} location.reload(); };
+    }
     if (mergeOrders(r.orders) || UI.pendingRender){
       const typing = document.activeElement && document.activeElement.closest('#main input, #main textarea, #main select, #modal-root, #drawer-root input');
       if (typing) UI.pendingRender = true; else { UI.pendingRender = false; rerender(true); }

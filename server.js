@@ -17,6 +17,8 @@ const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'data', 'crm.db');
 const AUTH = process.env.APP_AUTH || '';
 const FB_GRAPH = process.env.FB_GRAPH || 'https://graph.facebook.com';
 const MAX_BODY = 50 * 1024 * 1024;
+// Đổi mỗi lần deploy (index.html mới): tab đang mở so sánh để biết cần tải lại trang
+const BUILD = String(Math.round(fs.statSync(path.join(__dirname, 'index.html')).mtimeMs));
 
 fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 const db = new DatabaseSync(DB_FILE);
@@ -68,7 +70,13 @@ function applyChanges(ch){
     if (ch.replace) db.exec('DELETE FROM orders; DELETE FROM customers; DELETE FROM meta;');
     if (ch.meta) q.metaSet.run('state', JSON.stringify(ch.meta));
     if (ch.products) q.metaSet.run('products', JSON.stringify(ch.products));
-    for (const o of ch.orders || []) if (o && o.id) upsertOrder(o);
+    let rev = null;
+    for (const o of ch.orders || []) if (o && o.id){
+      // Tab đang chạy bản cũ có thể ghi lại mã chung 23: sửa thành trạng thái thật và báo cho các tab đang mở
+      const fixed = (o.status === '23' || o.ssStatus === '23') && fixStatus(o);
+      upsertOrder(o);
+      if (fixed){ rev = (rev ?? q.maxRev.get().rev) + 1; q.orderRev.run(rev, o.id); }
+    }
     for (const id of ch.deleteOrders || []) q.orderDel.run(String(id));
     for (const [phone, c] of Object.entries(ch.customers || {})) q.custSet.run(phone, JSON.stringify(c));
     for (const phone of ch.deleteCustomers || []) q.custDel.run(String(phone));
@@ -77,6 +85,13 @@ function applyChanges(ch){
 }
 
 // Sửa một lần các đơn kéo từ SuperShip trước khi có normalizeSuperShipOrder (payer/config dạng chữ)
+// Đơn mang mã chung 23: trạng thái thật theo hành trình. Trả về true nếu trạng thái đổi.
+function fixStatus(o){
+  const st = realStatus('23', o.journeys); const changed = st !== o.status;
+  o.ssStatus = '23'; o.status = st;
+  if (changed && ISSUE_CODES.includes(st) && !(o.issue && o.issue.handled)) o.issue = { handled: false, note: (o.issue || {}).note || '' };
+  return changed;
+}
 // Đơn đang mang mã chung 23: tính lại trạng thái thật theo hành trình
 function fixStatuses(){
   for (const r of db.prepare(`SELECT data FROM orders WHERE status = '23' OR (ss_code IS NOT NULL AND data LIKE '%"ssStatus":"23"%')`).all()){
@@ -257,8 +272,8 @@ http.createServer(async (req, res) => {
   if (!authorized(req)){ res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="CRM", charset="UTF-8"' }); return res.end('Cần đăng nhập'); }
   const url = new URL(req.url, 'http://x');
   try {
-    if (url.pathname === '/api/state' && req.method === 'GET') return send(res, 200, { state: readState(), rev: q.maxRev.get().rev });
-    if (url.pathname === '/api/orders' && req.method === 'GET') return send(res, 200, { orders: q.ordersAfter.all(+url.searchParams.get('after') || 0).map(r => JSON.parse(r.data)), rev: q.maxRev.get().rev });
+    if (url.pathname === '/api/state' && req.method === 'GET') return send(res, 200, { state: readState(), rev: q.maxRev.get().rev, build: BUILD });
+    if (url.pathname === '/api/orders' && req.method === 'GET') return send(res, 200, { orders: q.ordersAfter.all(+url.searchParams.get('after') || 0).map(r => JSON.parse(r.data)), rev: q.maxRev.get().rev, build: BUILD });
     if (url.pathname === '/api/supership/pull' && req.method === 'POST'){
       const { codes } = await readBody(req); const orders = [], errors = [];
       for (const code of [...new Set((codes || []).map(c => String(c).trim()).filter(Boolean))].slice(0, 500)){
