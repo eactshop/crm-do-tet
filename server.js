@@ -79,9 +79,9 @@ function applyChanges(ch){
 // Sửa một lần các đơn kéo từ SuperShip trước khi có normalizeSuperShipOrder (payer/config dạng chữ)
 // Đơn đang mang mã chung 23: tính lại trạng thái thật theo hành trình
 function fixStatuses(){
-  for (const r of db.prepare(`SELECT data FROM orders WHERE status = '23'`).all()){
+  for (const r of db.prepare(`SELECT data FROM orders WHERE status = '23' OR (ss_code IS NOT NULL AND data LIKE '%"ssStatus":"23"%')`).all()){
     const o = JSON.parse(r.data); const st = realStatus('23', o.journeys);
-    if (st !== '23'){ o.ssStatus = '23'; o.status = st; if (ISSUE_CODES.includes(st) && !(o.issue && o.issue.handled)) o.issue = { handled: false, note: (o.issue || {}).note || '' }; upsertOrder(o); }
+    if (st !== o.status){ o.ssStatus = '23'; o.status = st; if (ISSUE_CODES.includes(st) && !(o.issue && o.issue.handled)) o.issue = { handled: false, note: (o.issue || {}).note || '' }; upsertOrder(o); }
   }
 }
 function fixPulledOrders(){
@@ -100,7 +100,10 @@ const CODE_BY_NAME = Object.fromEntries(Object.entries(STATUS_NAMES).map(([k, v]
 function realStatus(code, journeys){
   if (code !== '23' || !Array.isArray(journeys) || !journeys.length) return code;
   const last = journeys.reduce((a, j) => !a || String(j.time) >= String(a.time) ? j : a, null);
-  return CODE_BY_NAME[foldName(last.status)] || code;
+  const c = CODE_BY_NAME[foldName(last.status)] || code;
+  // từng hoãn giao rồi quay lại "Đang Vận Chuyển" (chờ giao lại): trang SuperShip xếp vào tab Hoãn giao hàng
+  if (c === '23' && journeys.some(j => CODE_BY_NAME[foldName(j.status)] === '14')) return '14';
+  return c;
 }
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 const num = v => +String(v ?? '').replace(/[^\d.-]/g, '') || 0;
