@@ -255,18 +255,17 @@ h2.mono{font-size:18px}
 
 // ---------- Hằng số SuperShip ----------
 const STATUS = {'0':'Huỷ','1':'Đã Tiếp Nhận','2':'Chờ Lấy Hàng','3':'Đang Lấy Hàng','4':'Đã Lấy Hàng','5':'Hoãn Lấy Hàng','6':'Không Lấy Được','7':'Đang Nhập Kho','8':'Đã Nhập Kho','9':'Đang Chuyển Kho Giao','10':'Đã Chuyển Kho Giao','11':'Đang Giao Hàng','12':'Đã Giao Hàng Toàn Bộ','13':'Đã Giao Hàng Một Phần','14':'Hoãn Giao Hàng','15':'Không Giao Được','16':'Đã Đối Soát Giao Hàng','17':'Đã Đối Soát Trả Hàng','18':'Đang Chuyển Kho Trả','19':'Đã Chuyển Kho Trả','20':'Đang Trả Hàng','21':'Đã Trả Hàng','22':'Hoãn Trả Hàng','23':'Đang Vận Chuyển','24':'Xác Nhận Hoàn','25':'Hàng Thất Lạc','26':'Không Trả Được','27':'Đã Bồi Hoàn','draft':'Nháp – chưa đẩy'};
+// Nhóm trạng thái giống các tab trên trang khachhang.supership.vn
 const GROUPS = [
-  {id:'draft', name:'Nháp', codes:['draft'], tone:'neutral'},
-  {id:'pending', name:'Chờ lấy hàng', codes:['1','2','3'], tone:'info'},
-  {id:'pickup_issue', name:'Lấy hàng lỗi', codes:['5','6'], tone:'warn'},
-  {id:'transit', name:'Đang vận chuyển', codes:['4','7','8','9','10','23'], tone:'info'},
-  {id:'delivering', name:'Đang giao', codes:['11'], tone:'accent'},
-  {id:'deliver_issue', name:'Giao có vấn đề', codes:['14','15'], tone:'warn'},
-  {id:'success', name:'Giao thành công', codes:['12','13','16'], tone:'ok'},
-  {id:'returning', name:'Đang hoàn', codes:['18','19','20','22','24'], tone:'bad'},
-  {id:'returned', name:'Đã hoàn', codes:['17','21'], tone:'bad'},
-  {id:'incident', name:'Sự cố', codes:['25','26','27'], tone:'bad'},
+  {id:'pending', name:'Chưa lấy hàng', codes:['1','2','3','5','6'], tone:'info'},
+  {id:'delivering', name:'Đã lấy hàng - Đang giao hàng', codes:['4','7','8','9','10','11','23'], tone:'accent'},
+  {id:'deliver_issue', name:'Hoãn giao hàng', codes:['14','15'], tone:'warn'},
+  {id:'success', name:'Đã giao hàng', codes:['12','13','16'], tone:'ok'},
+  {id:'returning', name:'Đang chuyển hoàn', codes:['18','19','20','22','24'], tone:'bad'},
+  {id:'returned', name:'Đã trả hàng', codes:['17','21'], tone:'bad'},
   {id:'cancelled', name:'Đã huỷ', codes:['0'], tone:'neutral'},
+  {id:'incident', name:'Thất lạc / bồi hoàn', codes:['25','26','27'], tone:'bad'},
+  {id:'draft', name:'Nháp – chưa đẩy', codes:['draft'], tone:'neutral'},
 ];
 // Thứ tự trạng thái theo hành trình đơn trên SuperShip
 const STATUS_ORDER = ['draft','1','2','3','5','6','4','7','8','23','9','10','11','14','15','12','13','16','24','20','22','18','19','21','17','25','26','27','0'];
@@ -914,13 +913,13 @@ function matchPrint(o){ const f = UI.printF || 'all'; if (f === 'all') return tr
 function filteredOrders(){ return S.orders.filter(o => inRange(o) && matchQ(o) && matchPrint(o)); }
 function renderOrdersBody(){
   const base = filteredOrders();
-  // UI.group: 'all', mã trạng thái SuperShip, hoặc id nhóm (khi bấm từ trang Tổng quan)
-  const byGroup = !STATUS[UI.group] && UI.group !== 'all' && GROUPS.find(g => g.id === UI.group);
-  const list = UI.group === 'all' ? base : base.filter(o => byGroup ? groupOf(o.status).id === UI.group : o.status === UI.group);
-  const counts = {}; base.forEach(o => { counts[o.status] = (counts[o.status]||0) + 1; });
-  $('#o-chips').innerHTML = `<div class="chips"><button class="chip ${UI.group==='all'?'on':''}" data-act="group" data-group="all">Tất cả <b>${base.length}</b></button>
-    ${byGroup ? `<button class="chip on" data-act="group" data-group="all" title="Bỏ lọc nhóm">Nhóm: ${esc(byGroup.name)} <b>${list.length}</b> ×</button>` : ''}
-    ${STATUS_ORDER.filter(c => counts[c] || UI.group === c).map(c => `<button class="chip ${UI.group===c?'on':''}" data-act="group" data-group="${c}">${esc(STATUS[c])} <b>${counts[c]||0}</b></button>`).join('')}</div>`;
+  // Tab giống trang SuperShip; luôn hiện đủ các tab chính, tab phụ (thất lạc, nháp) chỉ hiện khi có đơn
+  const list = UI.group === 'all' ? base : base.filter(o => groupOf(o.status).id === UI.group);
+  const counts = {}; base.forEach(o => { const g = groupOf(o.status).id; counts[g] = (counts[g]||0) + 1; });
+  const sub = {}; list.forEach(o => { sub[o.status] = (sub[o.status]||0) + 1; });
+  $('#o-chips').innerHTML = `<div class="chips"><button class="chip ${UI.group==='all'?'on':''}" data-act="group" data-group="all">Tất cả (${base.length})</button>
+    ${GROUPS.filter(g => !['incident','draft'].includes(g.id) || counts[g.id] || UI.group === g.id).map(g => `<button class="chip ${UI.group===g.id?'on':''}" data-act="group" data-group="${g.id}">${g.name} (${counts[g.id]||0})</button>`).join('')}</div>
+    ${UI.group !== 'all' && Object.keys(sub).length > 1 ? `<div class="muted sm" style="margin-top:8px">Gồm: ${STATUS_ORDER.filter(c => sub[c]).map(c => `${esc(STATUS[c])} ${sub[c]}`).join(' · ')}</div>` : ''}`;
   for (const id of [...UI.sel]) if (!S.orders.find(o => o.id === id)) UI.sel.delete(id);
   const sel = S.orders.filter(o => UI.sel.has(o.id));
   $('#o-bulk').innerHTML = sel.length ? `<div class="bulk"><span>Đã chọn ${sel.length} đơn</span>
