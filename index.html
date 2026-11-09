@@ -267,6 +267,15 @@ const GROUPS = [
   {id:'incident', name:'Thất lạc / bồi hoàn', codes:['25','26','27'], tone:'bad'},
   {id:'draft', name:'Nháp – chưa đẩy', codes:['draft'], tone:'neutral'},
 ];
+// SuperShip hay trả mã chung 23 "Đang Vận Chuyển" cho cả đơn còn chờ lấy / đang giao / hoãn giao.
+// Trạng thái thật (khớp các tab trên trang SuperShip) là bước mới nhất trong hành trình.
+const foldName = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase().trim();
+const CODE_BY_NAME = Object.fromEntries(Object.entries(STATUS).map(([k, v]) => [foldName(v), k]));
+function realStatus(code, journeys){
+  if (code !== '23' || !Array.isArray(journeys) || !journeys.length) return code;
+  const last = journeys.reduce((a, j) => !a || String(j.time) >= String(a.time) ? j : a, null);
+  return CODE_BY_NAME[foldName(last.status)] || code;
+}
 // Thứ tự trạng thái theo hành trình đơn trên SuperShip
 const STATUS_ORDER = ['draft','1','2','3','5','6','4','7','8','23','9','10','11','14','15','12','13','16','24','20','22','18','19','21','17','25','26','27','0'];
 const GROUP_BY_CODE = {}; GROUPS.forEach(g => g.codes.forEach(c => GROUP_BY_CODE[c] = g));
@@ -595,8 +604,8 @@ async function syncOrder(o){
   if (!o.ssCode) return false;
   const r = await api('GET','/v1/partner/orders/info',{query:{code:o.ssCode}});
   const res = r.results || r; const before = o.status;
-  o.status = String(res.status ?? o.status);
   if (Array.isArray(res.journeys)) o.journeys = res.journeys;
+  o.ssStatus = String(res.status ?? o.ssStatus ?? o.status); o.status = realStatus(o.ssStatus, o.journeys);
   if (Array.isArray(res.notes)) o.ssNotes = res.notes;
   if (res.fee && typeof res.fee === 'object') o.fee = {shipment:+res.fee.shipment||0, insurance:+res.fee.insurance||0, return:+res.fee.return||0};
   o.lastSync = new Date().toISOString();
@@ -954,7 +963,7 @@ function orderDetail(o){
       <div class="muted mono sm">${o.ssCode ? 'SuperShip ' + esc(o.ssCode) + (o.shortcode ? ' · mã vạch ' + esc(o.shortcode) : '') + (o.sorting ? ' · phân loại ' + esc(o.sorting) : '') : 'Chưa đẩy lên SuperShip'}</div></div>
     <button class="icon-btn" data-act="drawer-close" aria-label="Đóng">×</button></header>
   <div class="dr-body">
-    <div class="row wrap">${pill(o.status)}<span class="muted sm">${draft ? '' : 'Mã #' + esc(o.status)}${o.lastSync ? ' · kiểm tra ' + ago(o.lastSync) : ''}${o.printedAt ? ' · đã in vận đơn ' + fmtDate(o.printedAt) : printable(o) ? ' · chưa in vận đơn' : ''}</span></div>
+    <div class="row wrap">${pill(o.status)}<span class="muted sm">${draft ? '' : 'Mã SuperShip #' + esc(o.ssStatus || o.status)}${o.lastSync ? ' · kiểm tra ' + ago(o.lastSync) : ''}${o.printedAt ? ' · đã in vận đơn ' + fmtDate(o.printedAt) : printable(o) ? ' · chưa in vận đơn' : ''}</span></div>
     <div class="row wrap">
       ${draft ? `<button class="btn primary" data-act="o-push" data-id="${o.id}">Đẩy lên SuperShip</button><button class="btn" data-act="o-edit" data-id="${o.id}">Sửa đơn</button><button class="btn danger" data-act="o-delete" data-id="${o.id}">Xoá nháp</button>` : ''}
       ${o.ssCode && !FINAL_CODES.includes(o.status) ? `<button class="btn" data-act="o-sync" data-id="${o.id}">Cập nhật trạng thái</button>` : ''}

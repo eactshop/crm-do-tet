@@ -77,6 +77,13 @@ function applyChanges(ch){
 }
 
 // Sửa một lần các đơn kéo từ SuperShip trước khi có normalizeSuperShipOrder (payer/config dạng chữ)
+// Đơn đang mang mã chung 23: tính lại trạng thái thật theo hành trình
+function fixStatuses(){
+  for (const r of db.prepare(`SELECT data FROM orders WHERE status = '23'`).all()){
+    const o = JSON.parse(r.data); const st = realStatus('23', o.journeys);
+    if (st !== '23'){ o.ssStatus = '23'; o.status = st; if (ISSUE_CODES.includes(st) && !(o.issue && o.issue.handled)) o.issue = { handled: false, note: (o.issue || {}).note || '' }; upsertOrder(o); }
+  }
+}
 function fixPulledOrders(){
   for (const r of db.prepare(`SELECT data FROM orders WHERE data LIKE '%"source":"supership"%'`).all()){
     const o = JSON.parse(r.data); if (normalizeSuperShipOrder(o, null)) upsertOrder(o);
@@ -86,6 +93,15 @@ function fixPulledOrders(){
 // ---------- SuperShip (gọi từ server, dùng token lưu trong Cài đặt) ----------
 const STATUS_NAMES = {'0':'Huỷ','1':'Đã Tiếp Nhận','2':'Chờ Lấy Hàng','3':'Đang Lấy Hàng','4':'Đã Lấy Hàng','5':'Hoãn Lấy Hàng','6':'Không Lấy Được','7':'Đang Nhập Kho','8':'Đã Nhập Kho','9':'Đang Chuyển Kho Giao','10':'Đã Chuyển Kho Giao','11':'Đang Giao Hàng','12':'Đã Giao Hàng Toàn Bộ','13':'Đã Giao Hàng Một Phần','14':'Hoãn Giao Hàng','15':'Không Giao Được','16':'Đã Đối Soát Giao Hàng','17':'Đã Đối Soát Trả Hàng','18':'Đang Chuyển Kho Trả','19':'Đã Chuyển Kho Trả','20':'Đang Trả Hàng','21':'Đã Trả Hàng','22':'Hoãn Trả Hàng','23':'Đang Vận Chuyển','24':'Xác Nhận Hoàn','25':'Hàng Thất Lạc','26':'Không Trả Được','27':'Đã Bồi Hoàn'};
 const ISSUE_CODES = ['5','6','14','15','22','25','26'];
+const foldName = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase().trim();
+const CODE_BY_NAME = Object.fromEntries(Object.entries(STATUS_NAMES).map(([k, v]) => [foldName(v), k]));
+// SuperShip hay trả mã chung 23 "Đang Vận Chuyển" cho cả đơn còn chờ lấy / đang giao / hoãn giao.
+// Trạng thái thật (khớp các tab trên trang SuperShip) là bước mới nhất trong hành trình.
+function realStatus(code, journeys){
+  if (code !== '23' || !Array.isArray(journeys) || !journeys.length) return code;
+  const last = journeys.reduce((a, j) => !a || String(j.time) >= String(a.time) ? j : a, null);
+  return CODE_BY_NAME[foldName(last.status)] || code;
+}
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 const num = v => +String(v ?? '').replace(/[^\d.-]/g, '') || 0;
 
@@ -125,7 +141,10 @@ function applySuperShip(info, how){
   const row = q.orderFind.get(code, soc, soc);
   const now = new Date().toISOString();
   let o = row && JSON.parse(row.data);
-  const status = info.status != null ? String(info.status) : null;
+  const rawStatus = info.status != null ? String(info.status) : null;
+  // webhook không kèm hành trình: tính cả bước mới mà webhook báo
+  const journeys = Array.isArray(info.journeys) ? info.journeys : ((o && o.journeys) || []).concat(how === 'hook' && rawStatus ? [{ time: info.updated_at || now, status: info.status_name || '' }] : []);
+  const status = rawStatus && realStatus(rawStatus, journeys);
   if (!o){
     const rc = info.receiver && typeof info.receiver === 'object' ? info.receiver : {};
     const prods = Array.isArray(info.products) ? info.products : [];
@@ -144,7 +163,7 @@ function applySuperShip(info, how){
     o.status = status; o.updatedAt = now;
     if (ISSUE_CODES.includes(status)) o.issue = { handled: false, note: (o.issue || {}).note || '' };
   }
-  o.ssCode = code;
+  o.ssCode = code; if (rawStatus) o.ssStatus = rawStatus;
   if (info.shortcode) o.shortcode = String(info.shortcode);
   if (Array.isArray(info.journeys)) o.journeys = info.journeys;
   else if (how === 'hook' && status) (o.journeys = o.journeys || []).push({ time: info.updated_at || now, status: info.status_name || STATUS_NAMES[status] || status, note: info.reason_text || '' });
@@ -224,7 +243,7 @@ function authorized(req){
   return h.startsWith('Basic ') && Buffer.from(h.slice(6), 'base64').toString('utf8') === AUTH;
 }
 
-fixPulledOrders();
+fixPulledOrders(); fixStatuses();
 http.createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/hook/supership/' + hookSecret()){
     let payload; try { payload = await readBody(req); } catch (e) { return send(res, 400, { error: e.message }); }
