@@ -269,6 +269,9 @@ http.createServer(async (req, res) => {
     if (payload && payload.code) hookQueue = hookQueue.then(() => pullCode(String(payload.code), payload)).catch(e => console.error('webhook', payload.code, e.message));
     return;
   }
+  // Trang chính sách quyền riêng tư công khai (Facebook cần đọc được, không qua Basic Auth)
+  if ((req.method === 'GET' || req.method === 'HEAD') && /^\/(privacy|data-deletion)\/?$/.test(req.url.split('?')[0]))
+    return send(res, 200, fs.readFileSync(path.join(__dirname, 'privacy.html')), 'text/html; charset=utf-8');
   if (!authorized(req)){ res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="CRM", charset="UTF-8"' }); return res.end('Cần đăng nhập'); }
   const url = new URL(req.url, 'http://x');
   try {
